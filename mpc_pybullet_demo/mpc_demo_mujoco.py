@@ -15,7 +15,9 @@ TARGET_VEL = 1.0
 L = 0.3
 T = 5.0
 DT = 0.2
+PHYSICS_HZ = 50.0
 RENDER_HZ = 30.0
+SUBSTEPS_PER_STEP = 3
 
 
 def body_id(model, name):
@@ -32,10 +34,9 @@ def get_state(data, bid):
     return np.array([data.xpos[bid][0], data.xpos[bid][1], speed, yaw])
 
 
-def set_ctrl(data, current_speed, acceleration, steering):
-    target_speed = current_speed + acceleration * DT
+def set_ctrl(data, acceleration, steering):
     data.ctrl[0] = steering
-    data.ctrl[1] = target_speed
+    data.ctrl[1] = acceleration
 
 
 def ego_to_global(state, x_mpc):
@@ -61,9 +62,25 @@ def _add_sphere(scn, radius, pos, rgba):
 
 
 def draw_path(scn, path):
-    step = max(1, path.shape[1] // 80)
-    for i in range(0, path.shape[1], step):
-        _add_sphere(scn, 0.04, [path[0, i], path[1, i], 0.005], [0, 0, 1, 0.5])
+    for i in range(path.shape[1] - 1):
+        x1, y1 = path[0, i], path[1, i]
+        x2, y2 = path[0, i + 1], path[1, i + 1]
+        dx = x2 - x1
+        dy = y2 - y1
+        length = float(np.hypot(dx, dy))
+        if length < 1e-6:
+            continue
+        ux, uy = dx / length, dy / length
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        g = scn.geoms[scn.ngeom]
+        mujoco.mjv_initGeom(
+            g, mujoco.mjtGeom.mjGEOM_CAPSULE,
+            np.array([0.008, length / 2, 0], dtype=np.float64),
+            np.array([cx, cy, 0.03], dtype=np.float64),
+            np.array([ux, uy, 0, -uy, ux, 0, 0, 0, 1], dtype=np.float64),
+            np.array([0, 0.6, 1, 1], dtype=np.float32),
+        )
+        scn.ngeom += 1
 
 
 def draw_trail(scn, x_hist, y_hist):
@@ -111,17 +128,29 @@ def main():
         VehicleModel(), T, DT, [20, 20, 10, 20], [30, 30, 30, 30], [10, 10], [10, 10]
     )
 
-    control = np.zeros(2)
-    x_hist, y_hist = [], []
-    x_mpc_world = None
+    target_ctrl = np.zeros(2)   # set by MPC thread, read by physics thread
+    x_hist, y_hist = [], []     # appended by MPC thread, read by render thread
+    x_mpc_world = None           # set by MPC thread, read by render thread
     mpc_elapsed = 0.0
     mpc_rtf = 0.0
     goal_reached = False
-    lock = threading.Lock()
 
     def physics_loop(viewer):
-        nonlocal control, x_hist, y_hist, x_mpc_world, mpc_elapsed, mpc_rtf, goal_reached
-        n_substeps = int(DT / model.opt.timestep)
+        nonlocal target_ctrl, goal_reached
+        step = 1.0 / PHYSICS_HZ
+
+        while viewer.is_running() and not goal_reached:
+            t0 = time.time()
+            with viewer.lock():
+                for _ in range(SUBSTEPS_PER_STEP):
+                    mujoco.mj_step(model, data)
+            elapsed = time.time() - t0
+            if step - elapsed > 0:
+                time.sleep(step - elapsed)
+
+    def mpc_loop(viewer):
+        nonlocal target_ctrl, x_hist, y_hist, x_mpc_world, mpc_elapsed, mpc_rtf, goal_reached
+        control = np.zeros(2)
 
         while viewer.is_running() and not goal_reached:
             with viewer.lock():
@@ -148,18 +177,12 @@ def main():
             elapsed = time.time() - start
             rtf = DT / elapsed if elapsed > 0 else 0
 
-            with viewer.lock():
-                set_ctrl(data, state[2], control[0], control[1])
-                for _ in range(n_substeps):
-                    mujoco.mj_step(model, data)
-                x_hist.append(state[0])
-                y_hist.append(state[1])
-
             x_mpc_world = ego_to_global(state, x_mpc) if x_mpc is not None else None
-
-            with lock:
-                mpc_elapsed = elapsed
-                mpc_rtf = rtf
+            x_hist.append(state[0])
+            y_hist.append(state[1])
+            target_ctrl = control.copy()
+            mpc_elapsed = elapsed
+            mpc_rtf = rtf
 
             if DT - elapsed > 0:
                 time.sleep(DT - elapsed)
@@ -172,19 +195,19 @@ def main():
 
         input("\033[92mPress Enter to continue...\033[0m")
 
-        thread = threading.Thread(target=physics_loop, args=(viewer,), daemon=True)
-        thread.start()
+        pt = threading.Thread(target=physics_loop, args=(viewer,), daemon=True)
+        mt = threading.Thread(target=mpc_loop, args=(viewer,), daemon=True)
+        pt.start()
+        mt.start()
 
         while viewer.is_running() and not goal_reached:
-            state = get_state(data, bid)
+            with viewer.lock():
+                state = get_state(data, bid)
+                set_ctrl(data, target_ctrl[0], target_ctrl[1])
 
             goal_dist = np.sqrt(
                 (state[0] - path[0, -1]) ** 2 + (state[1] - path[1, -1]) ** 2
             )
-
-            with lock:
-                elapsed = mpc_elapsed
-                rtf = mpc_rtf
 
             viewer.user_scn.ngeom = 0
             draw_path(viewer.user_scn, path)
@@ -194,8 +217,8 @@ def main():
             viewer.set_texts([
                 (None, None,
                  f"MPC Demo\n"
-                 f"v: {state[2]:.2f} m/s  |  steer: {np.degrees(control[1]):.1f} deg\n"
-                 f"mpc: {elapsed*1000:.0f} ms  |  RTF: {rtf:.1f}x  |  goal: {goal_dist:.2f} m",
+                 f"v: {state[2]:.2f} m/s  |  steer: {np.degrees(target_ctrl[1]):.1f} deg\n"
+                 f"mpc: {mpc_elapsed*1000:.0f} ms  |  RTF: {mpc_rtf:.1f}x  |  goal: {goal_dist:.2f} m",
                  ""),
             ])
 
