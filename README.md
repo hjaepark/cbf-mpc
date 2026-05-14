@@ -1,53 +1,56 @@
 # mpc_python
 
-I keep here my (old) notebooks on Model Predictive Control for path-following problems. Includes a Pybullet simulation to demo the controller. 
-This mainly uses **[CVXPY](https://www.cvxpy.org/)** as a framework. This repo contains code from other projecs, check them out in the special thanks section.
+I keep here my (old) notebooks on Model Predictive Control for path-following problems. Includes a Pybullet simulation to demo the controller.
 
-## Contents
+This mainly uses **[CVXPY](https://www.cvxpy.org/)** as a framework.
 
-### Jupyter Notebooks
+This repo contains code from other projecs, check them out in the special thanks section.
 
-1. State space model derivation -> analytical and numerical derivaion of the model
 
-2. MPC -> implementation and testing of various tweaks/improvements
+## Getting started
 
-3. Obstacle Avoidance -> Using halfplane constrains to avaoid track collisions -> Sill **work in progress**!
+### Nix Flake ❄️
 
-<!--nobody cares about this 
-## About
+A [Nix flake](flake.nix) is provided for a reproducible development shell:
 
-The MPC is a model predictive path following controller which does follow a predefined reference by solving an optimization problem. The resulting optimization problem is shown in the following equation:
+```bash
+nix develop --impure        # default with extra dev tools
+nix develop .#demo --impure # minimal shell just to run the demo
+```
 
-![](img/quicklatex_equation.png)
+GUI demos require `nixGL` (auto-detects Intel/AMD/NVIDIA GPU):
 
-The terns of the cost function are the sum of the **reference tracking error**, **heading effort** and **actuaction rate of change**.
+```bash
+nixGL python mpc_pybullet_demo/mpc_demo_pybullet.py
+```
 
-Where R,P,Q are the cost matrices used to tune the response.
+Headless demos run without it:
 
-The vehicle model is described by the bicycle kinematics model using the state space matrices A and B:
+```bash
+python mpc_pybullet_demo/mpc_demo_nosim.py
+```
 
-![](img/quicklatex2.png)
+### Conda
 
-The state variables **(x)** of the model are:
+```bash
+conda env create -f env.yml
+conda activate simulation
+```
 
-* **x** coordinate of the robot
-* **y** coordinate of the robot
-* **v** velocuty of the robot
-* **theta** heading of the robot
+Then run:
 
-The inputs **(u)** of the model are:
+```bash
+python3 mpc_demo_pybullet.py
+python3 mpc_demo_nosim.py
+```
 
-* **a** linear acceleration of the robot
-* **delta** steering angle of the robot
--->
+This environment also includes `jupyter lab` to experiment with the notebooks.
 
-### Results
+## Results
 
 Racing car model is from: *https://github.com/erwincoumans/pybullet_robots*.
 
 ![](img/f10.png)
-
-Results:
 
 ![](img/demo_bullet.gif)
 
@@ -55,51 +58,13 @@ Results:
 
 The settings used for tuning the MPC controller are in the **[mpc_config](./mpc_pybullet_demo/mpcpy/mpc_config.py)** class.
 
-### Usage
+## Notebooks
 
-The results above can be reproduced both in Docker and Conda.
+1. **Model derivation** — analytical and numerical derivation ([1.0](notebooks/1.0-lti-system-modelling.ipynb), [parametrized curves](notebooks/1.1-parametrized-path-curves.ipynb), [differential](notebooks/models/differential_model.ipynb), [motion model](notebooks/models/motion_model.ipynb))
 
-#### Docker
+2. **MPC** — implementation and testing of various tweaks ([2.0](notebooks/2.0-MPC-base.ipynb), [2.1](notebooks/2.1-MPC-with-iterative-linearization.ipynb), [2.2](notebooks/2.2-MPC-v2-car-reference-frame.ipynb), [2.3](notebooks/2.3-MPC-simplified.ipynb))
 
-From this repository root directory:
-
-```bash
-docker build -t mpc-demo -f docker/Dockerfile .
-```
-
-* To run the pybullet demo:
-```bash
-xhost +local:docker
-docker run -it --net=host --ipc=host --privileged \
-    --env="DISPLAY" \
-    --env="QT_X11_NO_MITSHM=1" \
-    --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
-    --volume="${XAUTHORITY}:/root/.Xauthority" \
-    mpc-demo:latest \
-    bash -c "python3 mpc_demo_pybullet.py"
-```
-
-* To run the simulation-less demo: change the last command to `python3 mpc_demo_nosim.py`.
-  * this is a simpler demo that does not use pybullet, useful for debugging.
-
-In both cases the script will promt the user to press `enter` before starting the demo, pybullet may take a few seconds.
-
-
-#### Conda Environment
-
-The environment used for this project can be repoduced via [conda](https://www.anaconda.com/products/distribution):
-```bash
-conda env create -f env.yml
-conda activate simulation
-```
-
-The demos can be run with:
-```
-python3 mpc_demo_pybullet.py
-python3 mpc_demo_nosim.py
-```
-
-This environment also includes `jupyter lab` to experiment with the jupyter notebooks.
+3. **Obstacle Avoidance** — halfplane constraints to avoid track collisions ([3.0](notebooks/3.0-MPC-v3-track-constrains.ipynb), [3.1](notebooks/3.1-better-track.ipynb)) — Still **work in progress**!
 
 ## References & Special Thanks :star: :
 * [Prof. Borrelli - mpc papers and material](https://borrelli.me.berkeley.edu/pdfpub/IV_KinematicMPC_jason.pdf)
