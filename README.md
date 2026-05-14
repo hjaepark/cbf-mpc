@@ -57,33 +57,7 @@ The settings used for tuning the MPC controller are in the **[mpc_config](./mpc_
 
 ### Usage
 
-The results above can be reproduced both in Docker and Conda.
-
-#### Docker
-
-From this repository root directory:
-
-```bash
-docker build -t mpc-demo -f docker/Dockerfile .
-```
-
-* To run the pybullet demo:
-```bash
-xhost +local:docker
-docker run -it --net=host --ipc=host --privileged \
-    --env="DISPLAY" \
-    --env="QT_X11_NO_MITSHM=1" \
-    --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
-    --volume="${XAUTHORITY}:/root/.Xauthority" \
-    mpc-demo:latest \
-    bash -c "python3 mpc_demo_pybullet.py"
-```
-
-* To run the simulation-less demo: change the last command to `python3 mpc_demo_nosim.py`.
-  * this is a simpler demo that does not use pybullet, useful for debugging.
-
-In both cases the script will promt the user to press `enter` before starting the demo, pybullet may take a few seconds.
-
+The results above can be reproduced via Conda or Nix.
 
 #### Conda Environment
 
