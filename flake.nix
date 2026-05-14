@@ -21,6 +21,7 @@
         core-python-pkgs = ps: with ps; [
           numpy
           matplotlib
+          mujoco
           pybullet
           cvxpy
           scipy
