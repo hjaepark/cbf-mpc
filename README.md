@@ -1,6 +1,7 @@
 # mpc_python
 
 I keep here my (old) notebooks on Model Predictive Control for path-following problems. Includes a Pybullet simulation to demo the controller. 
+
 This mainly uses **[CVXPY](https://www.cvxpy.org/)** as a framework. This repo contains code from other projecs, check them out in the special thanks section.
 
 ## Contents
@@ -12,34 +13,6 @@ This mainly uses **[CVXPY](https://www.cvxpy.org/)** as a framework. This repo c
 2. MPC -> implementation and testing of various tweaks/improvements
 
 3. Obstacle Avoidance -> Using halfplane constrains to avaoid track collisions -> Sill **work in progress**!
-
-<!--nobody cares about this 
-## About
-
-The MPC is a model predictive path following controller which does follow a predefined reference by solving an optimization problem. The resulting optimization problem is shown in the following equation:
-
-![](img/quicklatex_equation.png)
-
-The terns of the cost function are the sum of the **reference tracking error**, **heading effort** and **actuaction rate of change**.
-
-Where R,P,Q are the cost matrices used to tune the response.
-
-The vehicle model is described by the bicycle kinematics model using the state space matrices A and B:
-
-![](img/quicklatex2.png)
-
-The state variables **(x)** of the model are:
-
-* **x** coordinate of the robot
-* **y** coordinate of the robot
-* **v** velocuty of the robot
-* **theta** heading of the robot
-
-The inputs **(u)** of the model are:
-
-* **a** linear acceleration of the robot
-* **delta** steering angle of the robot
--->
 
 ### Results
 
@@ -80,7 +53,8 @@ This environment also includes `jupyter lab` to experiment with the jupyter note
 A [Nix flake](flake.nix) is provided for a reproducible development shell:
 
 ```bash
-nix develop --impure
+nix develop --impure        # default with extra dev tools
+nix develop .#demo --impure # minimal shell just to run the demo
 ```
 
 GUI demos require `nixGL` (auto-detects Intel/AMD/NVIDIA GPU):

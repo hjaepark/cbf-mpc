@@ -17,33 +17,70 @@
         nixgl-pkg = nixgl.packages.${system};
 
         # --- Python packages ---
-        python-with-packages = pkgs.python3.withPackages (ps: with ps; [
+        # Add/remove packages here (use the short name, e.g. "numpy" not "python3Packages.numpy")
+        core-python-pkgs = ps: with ps; [
           numpy
           matplotlib
           pybullet
           cvxpy
           scipy
           osqp
-          # e.g. jupyterlab, ipython, black, ruff, pytest, mypy, ...
-        ]);
+        ];
+
+        python-demo = pkgs.python3.withPackages core-python-pkgs;
+
+        python-dev = pkgs.python3.withPackages (ps:
+          (core-python-pkgs ps) ++ (with ps; [
+            jupyterlab
+            ipython
+            ipywidgets
+            nbformat
+            nbconvert
+            black
+            ruff
+          ])
+        );
 
       in
       {
-        devShells.default = pkgs.mkShell {
-          buildInputs = [
-            python-with-packages
-            nixgl-pkg.nixGLDefault
+        devShells = {
+          demo = pkgs.mkShell {
+            buildInputs = [
+              python-demo
+              nixgl-pkg.nixGLDefault
+            ];
 
-            # --- Additional binaries ---
-            # e.g. pkgs.cmake, pkgs.gdb, pkgs.htop, pkgs.just, ...
-          ];
+            shellHook = ''
+              echo "demo shell — bare deps to run the sim"
+              echo ""
+              echo "Run with GUI:"
+              echo "  nixGL python mpc_pybullet_demo/mpc_demo_pybullet.py"
+              echo ""
+              echo "Run without GUI:"
+              echo "  python mpc_pybullet_demo/mpc_demo_nosim.py"
+            '';
+          };
 
-          shellHook = ''
-            # --- Custom shell stuff ---
-            # e.g. export PATH="$PWD/scripts:$PATH"
-            #      source .venv/bin/activate
-            #      alias lint='ruff check .'
-          '';
+          default = pkgs.mkShell {
+            buildInputs = [
+              python-dev
+              nixgl-pkg.nixGLDefault
+            ];
+
+            shellHook = ''
+              echo "full dev shell — deps + jupyter + dev tools"
+              echo ""
+              echo "Run with GUI:"
+              echo "  nixGL python mpc_pybullet_demo/mpc_demo_pybullet.py"
+              echo ""
+              echo "Run without GUI:"
+              echo "  python mpc_pybullet_demo/mpc_demo_nosim.py"
+              echo ""
+              echo "Notebooks: jupyter lab"
+              echo "Lint: ruff check ."
+              echo "Format: black ."
+            '';
+          };
         };
       });
 }
