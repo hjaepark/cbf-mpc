@@ -17,7 +17,7 @@
         nixgl-pkg = nixgl.packages.${system};
 
         # --- Python packages ---
-        # Add/remove packages here (use the short name, e.g. "numpy" not "python3Packages.numpy")
+        # core ones for running the demo, don't touch these
         core-python-pkgs = ps: with ps; [
           numpy
           matplotlib
@@ -27,10 +27,8 @@
           osqp
         ];
 
-        python-demo = pkgs.python3.withPackages core-python-pkgs;
-
-        python-dev = pkgs.python3.withPackages (ps:
-          (core-python-pkgs ps) ++ (with ps; [
+        # dev packages, add extra stuff here
+        dev-python-pkgs = ps: with ps; [
             jupyterlab
             ipython
             ipywidgets
@@ -38,8 +36,19 @@
             nbconvert
             black
             ruff
-          ])
+          ];
+
+        python-demo = pkgs.python3.withPackages core-python-pkgs;
+
+        python-dev = pkgs.python3.withPackages (ps:
+          (core-python-pkgs ps) ++ (dev-python-pkgs ps)
         );
+
+        # --- System binaries ---
+        dev-bin-pkgs = with pkgs; [
+          # add here extra CLI tools for the dev shell
+          # cmake, gdb, htop, just, ...
+        ];
 
       in
       {
@@ -65,7 +74,7 @@
             buildInputs = [
               python-dev
               nixgl-pkg.nixGLDefault
-            ];
+            ] ++ dev-bin-pkgs;
 
             shellHook = ''
               echo "full dev shell — deps + jupyter + dev tools"
