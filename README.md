@@ -101,6 +101,26 @@ python3 mpc_demo_nosim.py
 
 This environment also includes `jupyter lab` to experiment with the jupyter notebooks.
 
+#### Nix Flake ❄️
+
+A [Nix flake](flake.nix) is provided for a reproducible development shell:
+
+```bash
+nix develop --impure
+```
+
+GUI demos require `nixGL` (auto-detects Intel/AMD/NVIDIA GPU):
+
+```bash
+nixGL python mpc_pybullet_demo/mpc_demo_pybullet.py
+```
+
+Headless demos run without it:
+
+```bash
+python mpc_pybullet_demo/mpc_demo_nosim.py
+```
+
 ## References & Special Thanks :star: :
 * [Prof. Borrelli - mpc papers and material](https://borrelli.me.berkeley.edu/pdfpub/IV_KinematicMPC_jason.pdf)
 * [AtsushiSakai - pythonrobotics](https://github.com/AtsushiSakai/PythonRobotics/)
