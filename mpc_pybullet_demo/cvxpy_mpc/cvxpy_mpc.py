@@ -245,7 +245,7 @@ class MPC:
         # x_bar is approximated as the target state
         # u_bar can be approximated as zero or a feedforward hold
 
-        # option 3: Iterative MPC (iMPC).
+        # option 3: Iterative MPC (iMPC) sort-of.
         # Instead of linearising based on the track, take the optimal trajectory calculated by the MPC in the previous control cycle
         # shift it forward by one timestep, and use that predicted trajectory as the linearization baseline (hence ITERATIVE).
         # Because the vehicle's actual movement matches its own recent predictions much closer than the "ideal raw path", the predicition is further improved
@@ -255,6 +255,8 @@ class MPC:
         # 2. Linearize physics around THAT trajectory (not the path).
         # 3. Solve optimization.
         # 4. Save the new output trajectory to use for linearization in the next frame.
+        #
+        # in real iMPC this preocess is reiterated for the same time step
 
         # Compute LTV matrices
         for k in range(self.control_horizon):
