@@ -241,8 +241,21 @@ def main():
         0.05,
     )
 
+    state_cost = [
+        1.0,
+        80.0,
+        10.0,
+        20.0,
+    ]  # [Along-track, Cross-track, Velocity, Heading]
+    actuation_cost = [10.0, 10.0]
     mpc = MPC(
-        VehicleModel(), T, DT, [20, 20, 10, 20], [30, 30, 30, 30], [10, 10], [10, 10]
+        VehicleModel(),
+        T,
+        DT,
+        state_cost,
+        state_cost,
+        actuation_cost,
+        actuation_cost,
     )
 
     steer_jnt = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, "buddy_steering_wheel")

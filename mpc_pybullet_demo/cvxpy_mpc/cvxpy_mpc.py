@@ -136,35 +136,73 @@ class MPC:
         # This approximation gets more inaccurate as the controller looks at the future.
         # To improve performance we can keep track of previous optimized x, u and compute these matrices for each timestep k
         # Ak, Bk, Ck = self.compute_linear_model_matrices(x_prev[:,k], u_prev[:,k])
-        A, B, C = self.compute_linear_model_matrices(initial_state, prev_cmd)
+        # A, B, C = self.compute_linear_model_matrices(initial_state, prev_cmd)
 
         # Tracking error cost
         for k in range(self.control_horizon):
-            cost += opt.quad_form(x[:, k + 1] - target[:, k], self.Q)
+            # Linearize around the state at timestep k
+            # x_bar is approximated as the target state Feedback (Linearization along a Reference).
+            # u_bar can be approximated as zero or (better) a feedforward hold
+            x_bar = target[:, k]
+            u_bar = np.array([0.0, 0.0])
 
-        # Final point tracking cost
-        cost += opt.quad_form(x[:, -1] - target[:, -1], self.Qf)
+            A_k, B_k, C_k = self.compute_linear_model_matrices(x_bar, u_bar)
 
-        # Actuation magnitude cost
-        for k in range(self.control_horizon):
+            # Kinematics constrains
+            constr += [x[:, k + 1] == A_k @ x[:, k] + B_k @ u[:, k] + C_k]
+
+            # (NAIVE) Tracking error cost
+            # cost += opt.quad_form(x[:, k + 1] - target[:, k], self.Q)
+
+            # Tracking raw XY is not the best for cruising vehicles...
+            # we care more about the **cross-track-error**: how far to the side I am from the path.
+            # But how we can achive this and keep the simple to understand kinematics?
+            # Solution: dynamically rotate the cost matrix Q at every single step of the horizon
+            # to align with the direction of the road at that specific point.
+
+            # Extract underlying base costs from diagonal components
+            # [q_along_track, q_cross_track, q_vel, q_heading]
+            q_along_track = self.Q[0, 0]
+            q_cross_track = self.Q[1, 1]
+            q_v = self.Q[2, 2]
+            q_theta = self.Q[3, 3]
+
+            # Rotation matrix mapping local (path-aligned) errors to global(world xy) coordinates
+            theta_ref = x_bar[3]
+            ct = np.cos(theta_ref)
+            st = np.sin(theta_ref)
+            R = np.array([[ct, -st], [st, ct]])
+
+            # We want to minimize local cost:  Error_local^T * Q_local * Error_local
+            # Since Global_Error = R * Local_Error, then Local_Error = R^T * Global_Error.
+            #
+            # So the equivalent global weight matrix is: Q_global = R * Q_local * R^T
+            # Compute custom global position weights for this specific path segment
+            Q_pos_local = np.array([[q_along_track, 0.0], [0.0, q_cross_track]])
+            Q_pos_global = R @ Q_pos_local @ R.T
+
+            # Reassemble the full 4x4 Q_k matrix for this horizon step (velocity and heading dont change)
+            Q_k = np.zeros((self.nx, self.nx))
+            Q_k[0:2, 0:2] = Q_pos_global
+            Q_k[2, 2] = q_v
+            Q_k[3, 3] = q_theta
+
+            cost += opt.quad_form(x[:, k + 1] - target[:, k], Q_k)
+
+            # Actuation magnitude cost
             cost += opt.quad_form(u[:, k], self.R)
 
-        # Actuation rate of change cost
-        for k in range(1, self.control_horizon):
-            cost += opt.quad_form(u[:, k] - u[:, k - 1], self.P)
+            constr += [opt.abs(u[0, k]) <= self.vehicle.max_acc]
+            constr += [opt.abs(u[1, k]) <= self.vehicle.max_steer]
 
-        # Kinematics Constrains
-        for k in range(self.control_horizon):
-            constr += [x[:, k + 1] == A @ x[:, k] + B @ u[:, k] + C]
+        # Final point tracking cost
+        # TODO: this should also rotate
+        # cost += opt.quad_form(x[:, -1] - target[:, -1], self.Qf)
 
         # initial state
         constr += [x[:, 0] == initial_state]
 
-        # actuation bounds
-        constr += [opt.abs(u[:, 0]) <= self.vehicle.max_acc]
-        constr += [opt.abs(u[:, 1]) <= self.vehicle.max_steer]
-
-        # Actuation rate of change bounds
+        # Actuation rate of change bounds (step 0 uses last cmd)
         constr += [opt.abs(u[0, 0] - prev_cmd[0]) / self.dt <= self.vehicle.max_d_acc]
         constr += [opt.abs(u[1, 0] - prev_cmd[1]) / self.dt <= self.vehicle.max_d_steer]
         for k in range(1, self.control_horizon):
