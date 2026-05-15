@@ -28,6 +28,7 @@ class SharedData:
         self.ctrl = np.zeros(2)  # [steering_rad, target_speed_mps]
         self.state = np.zeros(4)  # [x, y, speed, yaw]
         self.goal_reached = False
+        self.is_active = True
 
         # Telemetry & visualization
         self.x_hist = []
@@ -47,13 +48,14 @@ def controller_loop(mpc, path, shared):
     while True:
         start_time = time.time()
 
-        # 1. Safely grab the latest state from the simulation
+        # (safely) grab the latest state from the simulation
         with shared.lock:
-            if shared.goal_reached:
+            if not shared.is_active or shared.goal_reached:
                 break
             current_state = shared.state.copy()
+            elapsed = shared.mpc_elapsed
 
-        # 2. Check goal condition
+        # Check goal
         goal_dist = np.sqrt(
             (current_state[0] - path[0, -1]) ** 2
             + (current_state[1] - path[1, -1]) ** 2
@@ -63,15 +65,18 @@ def controller_loop(mpc, path, shared):
                 shared.goal_reached = True
             break
 
-        # 3. Heavy MPC Math (Done OUTSIDE the lock to avoid blocking physics)
+        # Start the math for actual MPC logic
         target = get_ref_trajectory(current_state, path, TARGET_VEL, T, DT)
 
-        # Add 1 time-step delay compensation
+        # Add delay compensation
+        # ok why we need this in practice? the optimiser takes some time
+        # to compute the next command. The mpc should compute the command for t+delay because that is
+        # when it will be applied. the actual delay is the expected computation time (assumed from last one)
         ego_state = np.array([0.0, 0.0, current_state[2], 0.0])
-        ego_state[0] += ego_state[2] * np.cos(ego_state[3]) * DT
-        ego_state[1] += ego_state[2] * np.sin(ego_state[3]) * DT
-        ego_state[2] += control[0] * DT
-        ego_state[3] += control[0] * np.tan(control[1]) / L * DT
+        ego_state[0] += ego_state[2] * np.cos(ego_state[3]) * elapsed
+        ego_state[1] += ego_state[2] * np.sin(ego_state[3]) * elapsed
+        ego_state[2] += control[0] * elapsed
+        ego_state[3] += control[0] * np.tan(control[1]) / L * elapsed
 
         x_mpc, u_mpc = mpc.step(ego_state, target, control, verbose=False)
 
@@ -86,6 +91,7 @@ def controller_loop(mpc, path, shared):
             ]
         )
 
+        #
         x_mpc_world = ego_to_global(current_state, x_mpc) if x_mpc is not None else None
 
         # 4. Safely push results back to the shared object
@@ -232,73 +238,81 @@ def main():
         viewer.cam.azimuth = -90
         viewer.cam.elevation = -45
 
+        fps = 60.0
+        render_dt = 1.0 / fps
         input("\033[92mPress Enter to continue...\033[0m")
 
-        while viewer.is_running():
-            step_start = time.time()
+        sim_start_time = time.perf_counter()
+        try:
+            while viewer.is_running() and not shared.goal_reached:
 
-            # sync data with MPC thread
+                # step the physics of mujoco
+                elapsed_real_time = time.perf_counter() - sim_start_time
+                while d.time < elapsed_real_time:
+
+                    # Apply controls right before the step
+                    with shared.lock:
+                        d.ctrl[:] = shared.ctrl[:]
+
+                    mujoco.mj_step(m, d)
+
+                # sync data with MPC thread
+                with shared.lock:
+                    shared.state[:] = get_state(d, bid)
+
+                    mpc_elapsed = shared.mpc_elapsed
+                    mpc_accel = shared.mpc_accel
+                    mpc_steer = shared.mpc_steer
+                    x_mpc_world = shared.x_mpc_world
+                    local_x_hist = list(shared.x_hist)
+                    local_y_hist = list(shared.y_hist)
+                    current_speed = shared.state[2]
+
+                # Update viz
+                viewer.user_scn.ngeom = 0
+                draw_path(viewer.user_scn, path)
+                draw_trail(viewer.user_scn, local_x_hist, local_y_hist)
+                if x_mpc_world is not None:
+                    draw_mpc_preview(viewer.user_scn, x_mpc_world)
+
+                actual_steer = np.degrees(d.qpos[steer_qaddr])
+                goal_dist = np.sqrt(
+                    (d.xpos[bid][0] - path[0, -1]) ** 2
+                    + (d.xpos[bid][1] - path[1, -1]) ** 2
+                )
+
+                viewer.set_texts(
+                    [
+                        (
+                            None,
+                            None,
+                            f"MPC Demo\n"
+                            f"state:  v {current_speed:.2f} m/s  |  steer {actual_steer:.1f} deg\n"
+                            f"MPC:    accel {mpc_accel:.2f} m/s^2  |  steer {np.degrees(mpc_steer):.1f} deg  |  {mpc_elapsed*1000:.0f} ms\n"
+                            f"goal:   {goal_dist:.2f} m",
+                            "",
+                        )
+                    ]
+                )
+
+                viewer.sync()
+
+                # Sleep just enough to hit 60 FPS
+                time_until_next_frame = render_dt - (
+                    time.perf_counter() - elapsed_real_time - sim_start_time
+                )
+                if time_until_next_frame > 0:
+                    time.sleep(time_until_next_frame)
+
+            # Show end state
+            if shared.goal_reached:
+                viewer.set_texts([(None, None, "GOAL REACHED", "")])
+                viewer.sync()
+                time.sleep(1.5)
+        finally:
+            # handles user closing the GUI window
             with shared.lock:
-                if shared.goal_reached:
-                    break
-
-                # Push physics state TO controller
-                shared.state[:] = get_state(d, bid)
-
-                # Pull controller inputs FROM controller
-                d.ctrl[:] = shared.ctrl[:]
-
-                # Extract copy of render vars to avoid holding lock during drawing
-                mpc_elapsed = shared.mpc_elapsed
-                mpc_accel = shared.mpc_accel
-                mpc_steer = shared.mpc_steer
-                x_mpc_world = shared.x_mpc_world
-                local_x_hist = list(shared.x_hist)
-                local_y_hist = list(shared.y_hist)
-                current_speed = shared.state[2]
-
-            # Step physics
-            mujoco.mj_step(m, d)
-
-            # Update viz
-            viewer.user_scn.ngeom = 0
-            draw_path(viewer.user_scn, path)
-            draw_trail(viewer.user_scn, local_x_hist, local_y_hist)
-            if x_mpc_world is not None:
-                draw_mpc_preview(viewer.user_scn, x_mpc_world)
-
-            actual_steer = np.degrees(d.qpos[steer_qaddr])
-            goal_dist = np.sqrt(
-                (d.xpos[bid][0] - path[0, -1]) ** 2
-                + (d.xpos[bid][1] - path[1, -1]) ** 2
-            )
-
-            viewer.set_texts(
-                [
-                    (
-                        None,
-                        None,
-                        f"MPC Demo\n"
-                        f"state:  v {current_speed:.2f} m/s  |  steer {actual_steer:.1f} deg\n"
-                        f"MPC:    accel {mpc_accel:.2f} m/s^2  |  steer {np.degrees(mpc_steer):.1f} deg  |  {mpc_elapsed*1000:.0f} ms\n"
-                        f"goal:   {goal_dist:.2f} m",
-                        "",
-                    )
-                ]
-            )
-
-            viewer.sync()
-
-            # Pace to real-time
-            time_until_next_step = m.opt.timestep - (time.time() - step_start)
-            if time_until_next_step > 0:
-                time.sleep(time_until_next_step)
-
-        # Show end state
-        if shared.goal_reached:
-            viewer.set_texts([(None, None, "GOAL REACHED", "")])
-            viewer.sync()
-            time.sleep(1.5)
+                shared.is_active = False
 
         viewer.clear_texts()
 
