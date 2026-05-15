@@ -1,37 +1,32 @@
 import numpy as np
-from scipy.interpolate import interp1d
+from scipy.interpolate import splprep, splev
 
 
 def compute_path_from_wp(start_xp, start_yp, step=0.1):
     """
-
-    Args:
-        start_xp (array-like): 1D array of x-positions
-        start_yp (array-like): 1D array of y-positions
-        step (float): intepolation step
-
-    Returns:
-        ndarray of shape (3,N) representing the  path as x,y,heading
+    Generates a physically drivable, smooth C2 continuous path.
     """
-    final_xp = []
-    final_yp = []
-    delta = step  # [m]
-    for idx in range(len(start_xp) - 1):
-        section_len = np.sum(
-            np.sqrt(
-                np.power(np.diff(start_xp[idx : idx + 2]), 2)
-                + np.power(np.diff(start_yp[idx : idx + 2]), 2)
-            )
-        )
-        interp_range = np.linspace(0, 1, np.floor(section_len / delta).astype(int))
-        fx = interp1d(np.linspace(0, 1, 2), start_xp[idx : idx + 2], kind=1)
-        fy = interp1d(np.linspace(0, 1, 2), start_yp[idx : idx + 2], kind=1)
-        # watch out to duplicate points!
-        final_xp = np.append(final_xp, fx(interp_range)[1:])
-        final_yp = np.append(final_yp, fy(interp_range)[1:])
-    dx = np.append(0, np.diff(final_xp))
-    dy = np.append(0, np.diff(final_yp))
+    # Fit a cubic spline (B-spline) to the waypoints
+    # s=0 forces the spline to pass exactly through your waypoints.
+    tck, u = splprep([start_xp, start_yp], s=0.0)
+
+    # increase resolution to calculate arc length accurately
+    u_fine = np.linspace(0, 1, 2000)
+    x_fine, y_fine = splev(u_fine, tck)
+
+    arc_lengths = np.zeros(len(u_fine))
+    arc_lengths[1:] = np.cumsum(np.hypot(np.diff(x_fine), np.diff(y_fine)))
+    total_len = arc_lengths[-1]
+
+    # interpolate by step size
+    num_points = int(total_len / step)
+    u_uniform = np.interp(np.linspace(0, total_len, num_points), arc_lengths, u_fine)
+    final_xp, final_yp = splev(u_uniform, tck)
+
+    dx = np.gradient(final_xp)
+    dy = np.gradient(final_yp)
     theta = np.arctan2(dy, dx)
+
     return np.vstack((final_xp, final_yp, theta))
 
 

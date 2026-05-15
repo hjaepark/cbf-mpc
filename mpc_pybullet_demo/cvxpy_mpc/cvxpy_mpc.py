@@ -50,10 +50,41 @@ class MPC:
         self.R = np.diag(input_cost)
         self.P = np.diag(input_rate_cost)
 
+        # CVXPY vars
+        self.x = opt.Variable((self.nx, self.control_horizon + 1), name="states")
+        self.u = opt.Variable((self.nu, self.control_horizon), name="actions")
+
+        # CVXPY params (placeholder for run-time data)
+        self.initial_state_param = opt.Parameter(self.nx, name="x0")
+        self.target_param = opt.Parameter(
+            (self.nx, self.control_horizon), name="target"
+        )
+        self.last_cmd_param = opt.Parameter(self.nu, name="last_applied_command")
+
+        self.A_params = [
+            opt.Parameter((self.nx, self.nx), name=f"A_{k}")
+            for k in range(self.control_horizon)
+        ]
+        self.B_params = [
+            opt.Parameter((self.nx, self.nu), name=f"B_{k}")
+            for k in range(self.control_horizon)
+        ]
+        self.C_params = [
+            opt.Parameter(self.nx, name=f"C_{k}") for k in range(self.control_horizon)
+        ]
+        self.Q_params = [
+            opt.Parameter((self.nx, self.nx), PSD=True, name=f"Q_{k}")
+            for k in range(self.control_horizon)
+        ]
+        self.Qf_param = opt.Parameter((self.nx, self.nx), PSD=True, name="Qf")
+
         # optimised vars
         # used for constrains and IMPC logic
         self.prev_cmd = None
         self.prev_trajectory = None
+
+        # build the problem ONCE
+        self.prob = self.make_mpc_problem()
 
     def compute_linear_model_matrices(self, x_bar: list, u_bar: list):
         """
@@ -81,6 +112,16 @@ class MPC:
         cd = np.cos(delta)
         td = np.tan(delta)
 
+        # CVXPY does not like abosolute 0 in params
+        if abs(st) < 1e-9:
+            st = 1e-9
+        if abs(ct) < 1e-9:
+            ct = 1e-9
+        if abs(cd) < 1e-9:
+            cd = 1e-9
+        if abs(td) < 1e-9:
+            td = 1e-9
+
         A = np.zeros((self.nx, self.nx))
         A[0, 2] = ct
         A[0, 3] = -v * st
@@ -107,6 +148,63 @@ class MPC:
         )
         return A_lin, B_lin, C_lin
 
+    def make_mpc_problem(
+        self,
+    ):
+
+        cost = 0
+        constr = []
+
+        # Tracking error cost
+        for k in range(self.control_horizon):
+
+            # Kinematics constrains
+            # Note each step uses the LTV matrix for that step
+            constr += [
+                self.x[:, k + 1]
+                == self.A_params[k] @ self.x[:, k]
+                + self.B_params[k] @ self.u[:, k]
+                + self.C_params[k]
+            ]
+
+            cost += opt.quad_form(
+                self.x[:, k + 1] - self.target_param[:, k], self.Q_params[k]
+            )
+
+            # Actuation magnitude cost
+            cost += opt.quad_form(self.u[:, k], self.R)
+
+            constr += [opt.abs(self.u[0, k]) <= self.vehicle.max_acc]
+            constr += [opt.abs(self.u[1, k]) <= self.vehicle.max_steer]
+
+        # Final point tracking cost
+        cost += opt.quad_form(self.x[:, -1] - self.target_param[:, -1], self.Qf_param)
+
+        # Initial state
+        constr += [self.x[:, 0] == self.initial_state_param]
+
+        # Actuation rate of change bounds (step 0 uses last cmd)
+        constr += [
+            opt.abs(self.u[0, 0] - self.last_cmd_param[0]) / self.dt
+            <= self.vehicle.max_d_acc
+        ]
+        constr += [
+            opt.abs(self.u[1, 0] - self.last_cmd_param[1]) / self.dt
+            <= self.vehicle.max_d_steer
+        ]
+        for k in range(1, self.control_horizon):
+            constr += [
+                opt.abs(self.u[0, k] - self.u[0, k - 1]) / self.dt
+                <= self.vehicle.max_d_acc
+            ]
+            constr += [
+                opt.abs(self.u[1, k] - self.u[1, k - 1]) / self.dt
+                <= self.vehicle.max_d_steer
+            ]
+
+        prob = opt.Problem(opt.Minimize(cost), constr)
+        return prob
+
     def step(
         self,
         initial_state: list,
@@ -129,68 +227,55 @@ class MPC:
         assert len(initial_state) == self.nx
         assert target.shape == (self.nx, self.control_horizon)
 
-        # Create variables needed for setting up cvxpy problem
-        x = opt.Variable((self.nx, self.control_horizon + 1), name="states")
-        u = opt.Variable((self.nu, self.control_horizon), name="actions")
-        cost = 0
-        constr = []
-        # The command applied to the car physically in the last loop
-        last_applied_cmd = (
-            self.prev_cmd[:, 0] if self.prev_cmd is not None else np.zeros(self.nu)
-        )
+        # update the parameter values
+        self.initial_state_param.value = initial_state
+        self.target_param.value = target
+        if self.prev_cmd is not None:
+            self.last_cmd_param.value = self.prev_cmd[:, 0]
+        else:
+            self.last_cmd_param.value = np.zeros(self.nu)
 
-        # Option 0: The state linearization is performed **once** (LTI) around the starting condition to simplify the controller.
+        ## compute system matrices
+        # Option 1: The state linearization is performed **once** (LTI) around the starting condition to simplify the controller.
         # This approximation gets more inaccurate as the controller looks at the future, as the system changes (a lot!) along the trajectory
         # A, B, C = self.compute_linear_model_matrices(initial_state, prev_cmd)
         # you will see the prediction is MUCH less accurate...
 
-        # Tracking error cost
+        # Option 2: Feedback Linearization along a Reference.
+        # x_bar is approximated as the target state
+        # u_bar can be approximated as zero or a feedforward hold
+
+        # option 3: Iterative MPC (iMPC).
+        # Instead of linearising based on the track, take the optimal trajectory calculated by the MPC in the previous control cycle
+        # shift it forward by one timestep, and use that predicted trajectory as the linearization baseline (hence ITERATIVE).
+        # Because the vehicle's actual movement matches its own recent predictions much closer than the "ideal raw path", the predicition is further improved
+        #
+        # It looks like this:
+        # 1. Take predicted trajectory from the last frame.
+        # 2. Linearize physics around THAT trajectory (not the path).
+        # 3. Solve optimization.
+        # 4. Save the new output trajectory to use for linearization in the next frame.
+
+        # Compute LTV matrices
         for k in range(self.control_horizon):
-            # Linearize around the state at timestep k (LTV)
-
-            # option 1: (Feedback Linearization along a Reference).
-            x_bar = target[:, k]  # x_bar is approximated as the target state
-            u_bar = np.array(
-                [0.0, 0.0]
-            )  # u_bar can be approximated as zero or a feedforward hold
-
-            # TODO: option 2: Iterative MPC (iMPC).
-            #  Instead of linearising based on the track, take the optimal trajectory calculated by the MPC in the previous control cycle
-            #  shift it forward by one timestep, and use that predicted trajectory as the linearization baseline (hence ITERATIVE).
-            #  Because the vehicle's actual movement matches its own recent predictions much closer than the "ideal raw path", the predicition is further improved
-            #
-            # It looks like this:
-            # 1. Take predicted trajectory from the last frame.
-            # 2. Linearize physics around THAT trajectory (not the path).
-            # 3. Solve optimization.
-            # 4. Save the new output trajectory to use for linearization in the next frame.
-
             if self.prev_trajectory is not None and self.prev_cmd is not None:
-                # Shift forward: Last step's k+1 is this step's k
-                x_bar = (
-                    self.prev_trajectory[:, k + 1]
-                    if k + 1 <= self.control_horizon
-                    else target[:, k]
-                )
-
+                x_bar = self.prev_trajectory[:, k + 1]
                 u_bar = (
                     self.prev_cmd[:, k + 1]
                     if k + 1 < self.control_horizon
                     else np.zeros(self.nu)
                 )
             else:
-                # Fallback for the very first frame of the simulation use option 1
                 x_bar = target[:, k]
                 u_bar = np.zeros(self.nu)
 
             A_k, B_k, C_k = self.compute_linear_model_matrices(x_bar, u_bar)
+            self.A_params[k].value = A_k
+            self.B_params[k].value = B_k
+            self.C_params[k].value = C_k
 
-            # Kinematics constrains
-            constr += [x[:, k + 1] == A_k @ x[:, k] + B_k @ u[:, k] + C_k]
-
-            # (NAIVE) Tracking error cost
-            # cost += opt.quad_form(x[:, k + 1] - target[:, k], self.Q)
-
+        ## compute cost matrices
+        for k in range(self.control_horizon):
             # Tracking raw XY is not the best for cruising vehicles...
             # we care more about the **cross-track-error**: how far to the side I am from the path.
             # But how we can achive this and keep the simple to understand kinematics?
@@ -224,18 +309,12 @@ class MPC:
             Q_k[2, 2] = q_v
             Q_k[3, 3] = q_theta
 
-            cost += opt.quad_form(x[:, k + 1] - target[:, k], Q_k)
+            Q_k += np.eye(self.nx) * 1e-9
+            self.Q_params[k].value = Q_k
 
-            # Actuation magnitude cost
-            cost += opt.quad_form(u[:, k], self.R)
-
-            constr += [opt.abs(u[0, k]) <= self.vehicle.max_acc]
-            constr += [opt.abs(u[1, k]) <= self.vehicle.max_steer]
-
-        # Final point tracking cost
-        # repeat the whole transoformation
-        theta_ref_final = target[3, -1]
-        ct_f, st_f = np.cos(theta_ref_final), np.sin(theta_ref_final)
+        # Rotated terminal cost matrix
+        theta_ref_f = target[3, -1]
+        ct_f, st_f = np.cos(theta_ref_f), np.sin(theta_ref_f)
         R_f = np.array([[ct_f, -st_f], [st_f, ct_f]])
         Qf_pos_global = R_f @ np.array([[self.Qf[0, 0], 0], [0, self.Qf[1, 1]]]) @ R_f.T
 
@@ -243,31 +322,13 @@ class MPC:
         Qf_k[0:2, 0:2] = Qf_pos_global
         Qf_k[2, 2] = self.Qf[2, 2]
         Qf_k[3, 3] = self.Qf[3, 3]
-        cost += opt.quad_form(x[:, -1] - target[:, -1], Qf_k)
 
-        # initial state
-        constr += [x[:, 0] == initial_state]
-
-        # Actuation rate of change bounds (step 0 uses last cmd)
-        constr += [
-            opt.abs(u[0, 0] - last_applied_cmd[0]) / self.dt <= self.vehicle.max_d_acc
-        ]
-        constr += [
-            opt.abs(u[1, 0] - last_applied_cmd[1]) / self.dt <= self.vehicle.max_d_steer
-        ]
-        for k in range(1, self.control_horizon):
-            constr += [
-                opt.abs(u[0, k] - u[0, k - 1]) / self.dt <= self.vehicle.max_d_acc
-            ]
-            constr += [
-                opt.abs(u[1, k] - u[1, k - 1]) / self.dt <= self.vehicle.max_d_steer
-            ]
-
-        prob = opt.Problem(opt.Minimize(cost), constr)
-        prob.solve(solver=opt.OSQP, warm_start=True, verbose=False)
+        Qf_k += np.eye(self.nx) * 1e-9
+        self.Qf_param.value = Qf_k
+        self.prob.solve(solver=opt.OSQP, warm_start=True, verbose=False)
 
         # store for next loop (iMPC)
-        self.prev_cmd = np.array(u.value)
-        self.prev_trajectory = np.array(x.value)
+        self.prev_cmd = np.array(self.u.value)
+        self.prev_trajectory = np.array(self.x.value)
 
-        return np.array(x.value), np.array(u.value)
+        return np.array(self.x.value), np.array(self.u.value)

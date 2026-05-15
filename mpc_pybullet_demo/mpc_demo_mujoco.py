@@ -42,8 +42,6 @@ class SharedData:
 
 def controller_loop(mpc, path, shared):
     """Runs continuously in the background at ~5Hz"""
-    # Assuming L is the vehicle wheelbase, grab it from the model object
-    L = mpc.vehicle.wheelbase
 
     while True:
         start_time = time.time()
@@ -75,6 +73,7 @@ def controller_loop(mpc, path, shared):
         theta = pred_state[3]
         a = last_control[0]
         delta = last_control[1]
+        L = mpc.vehicle.wheelbase
 
         # Integrate physics forward in global space
         pred_state[0] += v * np.cos(theta) * elapsed
@@ -82,7 +81,9 @@ def controller_loop(mpc, path, shared):
         pred_state[2] += a * elapsed
         pred_state[3] += (v * np.tan(delta) / L) * elapsed
 
-        # Get reference trajectory (already matches global coordinates)
+        # NOTE: we convert the state in ego frame ans we use a ego target
+        # so we the optimization problem is a bit easier and we save some solver time
+        # Get reference trajectory
         target = get_ref_trajectory(pred_state, path, TARGET_VEL, T, DT)
 
         # Integrate physics forward in ego space
