@@ -134,54 +134,77 @@ def ego_to_global(state, x_mpc):
     return traj
 
 
-def _add_sphere(scn, radius, pos, rgba):
-    g = scn.geoms[scn.ngeom]
-    mujoco.mjv_initGeom(
-        g,
-        mujoco.mjtGeom.mjGEOM_SPHERE,
-        np.array([radius, 0, 0], dtype=np.float64),
-        np.array(pos, dtype=np.float64),
-        np.eye(3, dtype=np.float64).ravel(),
-        np.array(rgba, dtype=np.float32),
-    )
-    scn.ngeom += 1
-
-
-def draw_path(scn, path):
+def draw_path(viewer, path):
+    """Draws the reference path"""
     for i in range(path.shape[1] - 1):
-        x1, y1 = path[0, i], path[1, i]
-        x2, y2 = path[0, i + 1], path[1, i + 1]
-        dx = x2 - x1
-        dy = y2 - y1
-        length = float(np.hypot(dx, dy))
-        if length < 1e-6:
-            continue
-        ux, uy = dx / length, dy / length
-        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-        g = scn.geoms[scn.ngeom]
+        if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
+            break
+
+        # next geometry slot
+        g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
+
+        p1 = np.array([path[0, i], path[1, i], 0.03], dtype=np.float64)
+        p2 = np.array([path[0, i + 1], path[1, i + 1], 0.03], dtype=np.float64)
+
         mujoco.mjv_initGeom(
             g,
-            mujoco.mjtGeom.mjGEOM_CAPSULE,
-            np.array([0.008, length / 2, 0], dtype=np.float64),
-            np.array([cx, cy, 0.03], dtype=np.float64),
-            np.array([ux, uy, 0, -uy, ux, 0, 0, 0, 1], dtype=np.float64),
-            np.array([0, 0.6, 1, 1], dtype=np.float32),
+            type=mujoco.mjtGeom.mjGEOM_CAPSULE,
+            size=np.array(
+                [0.008, 0.0, 0.0], dtype=np.float64
+            ),  # [radius, unused, unused]
+            pos=np.zeros(3, dtype=np.float64),
+            mat=np.eye(3).ravel(),
+            rgba=np.array([0, 0.6, 1, 1], dtype=np.float32),
         )
-        scn.ngeom += 1
+
+        # mujoco handles the vector math to stretch it between p1 and p2
+        mujoco.mjv_connector(g, mujoco.mjtGeom.mjGEOM_CAPSULE, 0.008, p1, p2)
+
+        viewer.user_scn.ngeom += 1
 
 
-def draw_trail(scn, x_hist, y_hist):
+def draw_trail(viewer, x_hist, y_hist):
+    """Draws breadcrumbs using strict arrays."""
     step = max(1, len(x_hist) // 40)
     for i in range(0, len(x_hist), step):
+        if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
+            break
+
+        # next geometry slot
+        g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
         alpha = (i + 1) / len(x_hist) * 0.8
-        _add_sphere(scn, 0.025, [x_hist[i], y_hist[i], 0.005], [1, 0, 0, alpha])
 
-
-def draw_mpc_preview(scn, x_mpc_world):
-    for i in range(x_mpc_world.shape[1]):
-        _add_sphere(
-            scn, 0.03, [x_mpc_world[0, i], x_mpc_world[1, i], 0.01], [0, 1, 0, 0.6]
+        mujoco.mjv_initGeom(
+            g,
+            type=mujoco.mjtGeom.mjGEOM_SPHERE,
+            size=np.array([0.025, 0.0, 0.0], dtype=np.float64),
+            pos=np.array([x_hist[i], y_hist[i], 0.005], dtype=np.float64),
+            mat=np.eye(3).ravel(),
+            rgba=np.array([1, 0, 0, alpha], dtype=np.float32),
         )
+        viewer.user_scn.ngeom += 1
+
+
+def draw_mpc_preview(viewer, x_mpc_world):
+    """Draws predicted horizon points using strict arrays."""
+    for i in range(x_mpc_world.shape[1]):
+        if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
+            break
+
+        # next geometry slot
+        g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
+
+        mujoco.mjv_initGeom(
+            g,
+            type=mujoco.mjtGeom.mjGEOM_SPHERE,
+            size=np.array([0.03, 0.0, 0.0], dtype=np.float64),
+            pos=np.array(
+                [x_mpc_world[0, i], x_mpc_world[1, i], 0.01], dtype=np.float64
+            ),
+            mat=np.eye(3).ravel(),
+            rgba=np.array([0, 1, 0, 0.6], dtype=np.float32),
+        )
+        viewer.user_scn.ngeom += 1
 
 
 def plot_results(path, x_hist, y_hist):
@@ -252,6 +275,7 @@ def main():
 
                     # Apply controls right before the step
                     with shared.lock:
+                        # this value is held constant between MPC updates. (Zero order hold)
                         d.ctrl[:] = shared.ctrl[:]
 
                     mujoco.mj_step(m, d)
@@ -270,10 +294,10 @@ def main():
 
                 # Update viz
                 viewer.user_scn.ngeom = 0
-                draw_path(viewer.user_scn, path)
-                draw_trail(viewer.user_scn, local_x_hist, local_y_hist)
+                draw_path(viewer, path)
+                draw_trail(viewer, local_x_hist, local_y_hist)
                 if x_mpc_world is not None:
-                    draw_mpc_preview(viewer.user_scn, x_mpc_world)
+                    draw_mpc_preview(viewer, x_mpc_world)
 
                 actual_steer = np.degrees(d.qpos[steer_qaddr])
                 goal_dist = np.sqrt(
