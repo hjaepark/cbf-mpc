@@ -11,7 +11,6 @@ from cvxpy_mpc import MPC, VehicleModel
 from cvxpy_mpc.utils import compute_path_from_wp, get_ref_trajectory
 
 TARGET_VEL = 1.0
-L = 0.3
 T = 5.0
 DT = 0.2  # controller time step
 
@@ -43,7 +42,8 @@ class SharedData:
 
 def controller_loop(mpc, path, shared):
     """Runs continuously in the background at ~5Hz"""
-    control = np.zeros(2)
+    # Assuming L is the vehicle wheelbase, grab it from the model object
+    L = mpc.vehicle.wheelbase
 
     while True:
         start_time = time.time()
@@ -52,10 +52,11 @@ def controller_loop(mpc, path, shared):
         with shared.lock:
             if not shared.is_active or shared.goal_reached:
                 break
-            current_state = shared.state.copy()
+            current_state = shared.state.copy()  # Global [X, Y, V, Theta]
+            last_control = (shared.mpc_accel, shared.mpc_steer)  # [Accel, Steer]
             elapsed = shared.mpc_elapsed
 
-        # Check goal
+        # Check goal using absolute global coordinates
         goal_dist = np.sqrt(
             (current_state[0] - path[0, -1]) ** 2
             + (current_state[1] - path[1, -1]) ** 2
@@ -65,46 +66,56 @@ def controller_loop(mpc, path, shared):
                 shared.goal_reached = True
             break
 
-        # Start the math for actual MPC logic
-        target = get_ref_trajectory(current_state, path, TARGET_VEL, T, DT)
-
         # Add delay compensation
         # ok why we need this in practice? the optimiser takes some time
         # to compute the next command. The mpc should compute the command for t+delay because that is
         # when it will be applied. the actual delay is the expected computation time (assumed from last one)
-        ego_state = np.array([0.0, 0.0, current_state[2], 0.0])
-        ego_state[0] += ego_state[2] * np.cos(ego_state[3]) * elapsed
-        ego_state[1] += ego_state[2] * np.sin(ego_state[3]) * elapsed
-        ego_state[2] += control[0] * elapsed
-        ego_state[3] += control[0] * np.tan(control[1]) / L * elapsed
+        pred_state = current_state.copy()
+        v = pred_state[2]
+        theta = pred_state[3]
+        a = last_control[0]
+        delta = last_control[1]
 
-        x_mpc, u_mpc = mpc.step(ego_state, target, control, verbose=False)
+        # Integrate physics forward in global space
+        pred_state[0] += v * np.cos(theta) * elapsed
+        pred_state[1] += v * np.sin(theta) * elapsed
+        pred_state[2] += a * elapsed
+        pred_state[3] += (v * np.tan(delta) / L) * elapsed
 
-        control[0] = u_mpc[0, 0]
-        control[1] = u_mpc[1, 0]
+        # Get reference trajectory (already matches global coordinates)
+        target = get_ref_trajectory(pred_state, path, TARGET_VEL, T, DT)
+
+        # Integrate physics forward in ego space
+        pred_ego_state = [0.0, 0.0, v, 0.0]
+        pred_ego_state[0] += v * np.cos(theta) * elapsed
+        pred_ego_state[1] += v * np.sin(theta) * elapsed
+        pred_ego_state[2] += a * elapsed
+        pred_ego_state[3] += (v * np.tan(delta) / L) * elapsed
+        x_mpc, u_mpc = mpc.step(pred_ego_state, target, verbose=False)
+
+        # Extract the immediate next optimal control actions
+        control = (u_mpc[0, 0], u_mpc[1, 0])
         elapsed = time.time() - start_time
 
+        # Format control values for MuJoCo actuator expectations
         new_ctrl = np.array(
             [
-                control[1],  # steer (rad)
-                current_state[2] + control[0] * DT,  # target speed (m/s)
+                control[1],  # Target steer angle (rad)
+                current_state[2] + control[0] * DT,  # Target velocity (m/s)
             ]
         )
 
-        #
-        x_mpc_world = ego_to_global(current_state, x_mpc) if x_mpc is not None else None
-
-        # 4. Safely push results back to the shared object
+        # Safely push results back to the shared object
         with shared.lock:
             shared.ctrl[:] = new_ctrl
             shared.mpc_accel = control[0]
             shared.mpc_steer = control[1]
             shared.mpc_elapsed = elapsed
-            shared.x_mpc_world = x_mpc_world
+            shared.x_mpc_world = ego_to_global(pred_state, x_mpc)
             shared.x_hist.append(current_state[0])
             shared.y_hist.append(current_state[1])
 
-        # Enforce ~5Hz loop
+        # Enforce loop frequency
         elapsed_total = time.time() - start_time
         sleep_time = max(0.0, DT - elapsed_total)
         time.sleep(sleep_time)
@@ -295,6 +306,7 @@ def main():
 
                 # sync data with MPC thread
                 with shared.lock:
+                    # TODO: this would come from a proper state estimator
                     shared.state[:] = get_state(d, bid)
 
                     mpc_elapsed = shared.mpc_elapsed

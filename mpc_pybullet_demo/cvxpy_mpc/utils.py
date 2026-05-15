@@ -66,60 +66,54 @@ def get_nn_idx(state, path):
     return target_idx
 
 
-def get_ref_trajectory(state, path, target_v, T, DT):
+def get_ref_trajectory(state, path, target_v, T, DT, ego_frame=True):
     """
-
     Args:
-        state (array-like): state of the vehicle in global frame
+        state (array-like): state of the vehicle in global frame [x, y, v, heading]
         path (ndarray): 2D array representing the path as x,y,heading points in global frame
         target_v (float): desired speed
         T (float): control horizon duration
         DT (float):  control horizon time-step
+        ego_frame (bool): If True, returns trajectory in vehicle's ego frame.
+                          If False, returns trajectory in the global world frame.
 
     Returns:
-        ndarray: 2D array representing state space trajectory [x_k, y_k, v_k, theta_k] w.r.t ego frame.
-        Interpolated according to the time-step and the desired velocity
+        ndarray: 2D array representing state space trajectory [x_k, y_k, v_k, theta_k]
     """
     K = int(T / DT)
 
     xref = np.zeros((4, K))
     ind = get_nn_idx(state, path)
 
+    # Calculate cumulative distance along the path
     cdist = np.append(
-        [0.0], np.cumsum(np.hypot(np.diff(path[0, :].T), np.diff(path[1, :]).T))
+        [0.0], np.cumsum(np.hypot(np.diff(path[0, :]), np.diff(path[1, :])))
     )
     cdist = np.clip(cdist, cdist[0], cdist[-1])
 
     start_dist = cdist[ind]
     interp_points = [d * DT * target_v + start_dist for d in range(1, K + 1)]
+
+    # Compute interpolation
     xref[0, :] = np.interp(interp_points, cdist, path[0, :])
     xref[1, :] = np.interp(interp_points, cdist, path[1, :])
     xref[2, :] = target_v
     xref[3, :] = np.interp(interp_points, cdist, path[2, :])
 
-    # points where the vehicle is at the end of trajectory
     xref_cdist = np.interp(interp_points, cdist, cdist)
     stop_idx = np.where(xref_cdist == cdist[-1])
     xref[2, stop_idx] = 0.0
 
-    # transform in ego frame
-    dx = xref[0, :] - state[0]
-    dy = xref[1, :] - state[1]
-    xref[0, :] = dx * np.cos(-state[3]) - dy * np.sin(-state[3])  # X
-    xref[1, :] = dy * np.cos(-state[3]) + dx * np.sin(-state[3])  # Y
-    xref[3, :] = path[2, ind] - state[3]  # Theta
+    if ego_frame:
+        dx = xref[0, :] - state[0]
+        dy = xref[1, :] - state[1]
+        xref[0, :] = dx * np.cos(-state[3]) - dy * np.sin(-state[3])  # Local X
+        xref[1, :] = dy * np.cos(-state[3]) + dx * np.sin(-state[3])  # Local Y
 
+        xref[3, :] = xref[3, :] - state[3]  # Local Theta
+
+    # Continuous Angle Smoothing
     def fix_angle_reference(angle_ref, angle_init):
-        """
-        Removes jumps greater than 2PI to smooth the heading
-
-        Args:
-            angle_ref (array-like):
-            angle_init (float):
-
-        Returns:
-            array-like:
-        """
         diff_angle = angle_ref - angle_init
         diff_angle = np.unwrap(diff_angle)
         return angle_init + diff_angle
