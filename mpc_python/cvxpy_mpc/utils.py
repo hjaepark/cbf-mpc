@@ -74,10 +74,12 @@ def get_ref_trajectory(state, path, target_v, T, DT, ego_frame=True):
 
     Returns:
         ndarray: 2D array representing state space trajectory [x_k, y_k, v_k, theta_k]
+                 with shape (4, K + 1) matching nodes from k=0 to k=K.
     """
     K = int(T / DT)
 
-    xref = np.zeros((4, K))
+    # FIX 1: Allocate K + 1 elements to map exactly from k=0 (initial) to k=K (terminal)
+    xref = np.zeros((4, K + 1))
     ind = get_nn_idx(state, path)
 
     # Calculate cumulative distance along the path
@@ -87,9 +89,11 @@ def get_ref_trajectory(state, path, target_v, T, DT, ego_frame=True):
     cdist = np.clip(cdist, cdist[0], cdist[-1])
 
     start_dist = cdist[ind]
-    interp_points = [d * DT * target_v + start_dist for d in range(1, K + 1)]
 
-    # Compute interpolation
+    # FIX 2: Change range from (1, K + 1) to (0, K + 1) to include the t=0 starting node
+    interp_points = [d * DT * target_v + start_dist for d in range(0, K + 1)]
+
+    # Compute interpolation (automatically maps across all K + 1 points)
     xref[0, :] = np.interp(interp_points, cdist, path[0, :])
     xref[1, :] = np.interp(interp_points, cdist, path[1, :])
     xref[2, :] = target_v
@@ -114,6 +118,7 @@ def get_ref_trajectory(state, path, target_v, T, DT, ego_frame=True):
         return angle_init + diff_angle
 
     xref[3, :] = (xref[3, :] + np.pi) % (2.0 * np.pi) - np.pi
+
     xref[3, :] = fix_angle_reference(xref[3, :], xref[3, 0])
 
     return xref

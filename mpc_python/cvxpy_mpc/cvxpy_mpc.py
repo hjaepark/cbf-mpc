@@ -40,7 +40,7 @@ class MPC:
         self.Q: npt.NDArray[np.float64] = np.diag(state_cost)
         self.Qf: npt.NDArray[np.float64] = np.diag(final_state_cost)
         self.R: npt.NDArray[np.float64] = np.diag(input_cost)
-        self.P: npt.NDArray[np.float64] = np.diag(input_rate_cost)
+        self.Rr: npt.NDArray[np.float64] = np.diag(input_rate_cost)
 
         # CVXPY vars
         self.x: opt.Variable = opt.Variable(
@@ -74,12 +74,12 @@ class MPC:
         # TARGET params
         # done this way to help make the cross-track error Disciplined Parametrized Programming (DPP) compliant...
         # see https://www.cvxpy.org/tutorial/dpp/index.html
-        self.cos_param = opt.Parameter(self.control_horizon)
-        self.sin_param = opt.Parameter(self.control_horizon)
-        self.p_along_ref_param = opt.Parameter(self.control_horizon)
-        self.p_cross_ref_param = opt.Parameter(self.control_horizon)
-        self.v_ref_param = opt.Parameter(self.control_horizon)
-        self.theta_ref_param = opt.Parameter(self.control_horizon)
+        self.cos_param = opt.Parameter(self.control_horizon + 1)
+        self.sin_param = opt.Parameter(self.control_horizon + 1)
+        self.p_along_ref_param = opt.Parameter(self.control_horizon + 1)
+        self.p_cross_ref_param = opt.Parameter(self.control_horizon + 1)
+        self.v_ref_param = opt.Parameter(self.control_horizon + 1)
+        self.theta_ref_param = opt.Parameter(self.control_horizon + 1)
 
         # optimised vars
         self.prev_cmd: npt.NDArray[np.float64] | None = None
@@ -199,10 +199,16 @@ class MPC:
             - self.p_cross_ref_param[-1]
         )
 
-        cost += (q_along_track * 2.0) * opt.square(e_along_f)
-        cost += (q_cross_track * 2.0) * opt.square(e_cross_f)
-        cost += (q_v * 2.0) * opt.square(self.x[2, -1] - self.v_ref_param[-1])
-        cost += (q_theta * 2.0) * opt.square(self.x[3, -1] - self.theta_ref_param[-1])
+        q_along_track, q_cross_track, q_v, q_theta = (
+            self.Qf[0, 0],
+            self.Qf[1, 1],
+            self.Qf[2, 2],
+            self.Qf[3, 3],
+        )
+        cost += q_along_track * opt.square(e_along_f)
+        cost += q_cross_track * opt.square(e_cross_f)
+        cost += q_v * opt.square(self.x[2, -1] - self.v_ref_param[-1])
+        cost += q_theta * opt.square(self.x[3, -1] - self.theta_ref_param[-1])
 
         # Initial state
         constr += [self.x[:, 0] == self.initial_state_param]
@@ -238,7 +244,7 @@ class MPC:
         tolerance: float = 1e-2,
     ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
         assert len(initial_state) == self.nx
-        assert target.shape == (self.nx, self.control_horizon)
+        assert target.shape == (self.nx, self.control_horizon + 1)
 
         self.initial_state_param.value = np.array(initial_state)
         self.last_cmd_param.value = (
@@ -291,7 +297,7 @@ class MPC:
             u_guess[:, -1] = self.prev_cmd[:, -1]
         else:
             # first iteration guess: pretend the vehicle follows the reference perfectly
-            x_guess = np.hstack((target, target[:, -1].reshape(self.nx, 1)))
+            x_guess = target
             u_guess = np.zeros((self.nu, self.control_horizon))
 
         # The iMPC Optimization Loop
