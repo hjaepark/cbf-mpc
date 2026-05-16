@@ -152,9 +152,10 @@ class MPC:
             # The standard cross-track and along-track errors are calculated by projecting position errors onto the track point
             # $\theta_{\text{ref}}$:$$e_{\text{along}} = \cos(\theta_{\text{ref}})(x - x_{\text{ref}}) + \sin(\theta_{\text{ref}})(y - y_{\text{ref}})
             # $e_{\text{cross}} = -\sin(\theta_{\text{ref}})(x - x_{\text{ref}}) + \cos(\theta_{\text{ref}})(y - y_{\text{ref}})$
+            # we expand that and get the following Algebraic problem:
 
             # Algebraic along-track and cross-track expressions
-            # We will fill the values when the reference is provided
+            # We will fill the values when the reference is provided, that is why they are params
             e_along = (
                 self.cos_param[k] * self.x[0, k]
                 + self.sin_param[k] * self.x[1, k]
@@ -275,7 +276,7 @@ class MPC:
         # x_bar is approximated as the target state
         # u_bar can be approximated as zero or a feedforward hold
 
-        # option 3: Iterative MPC (iMPC) sort-of.
+        # option 3: Iterative MPC (iMPC).
         # Instead of linearising based on the track, take the optimal trajectory calculated by the MPC in the previous control cycle
         # shift it forward by one timestep, and use that predicted trajectory as the linearization baseline (hence ITERATIVE).
         # Because the vehicle's actual movement matches its own recent predictions much closer than the "ideal raw path", the predicition is further improved
@@ -290,12 +291,11 @@ class MPC:
         if self.prev_trajectory is not None and self.prev_cmd is not None:
             # Shift previous optimal trajectory left by 1 timestep
             x_guess = np.roll(self.prev_trajectory, -1, axis=1)
-            x_guess[:, -1] = target[:, -1]
+            x_guess[:, -1] = self.prev_trajectory[:, -1]
             u_guess = np.roll(self.prev_cmd, -1, axis=1)
             u_guess[:, -1] = self.prev_cmd[:, -1]
         else:
-            x_0 = np.array(initial_state).reshape(self.nx, 1)
-            x_guess = np.hstack((x_0, target))
+            x_guess = np.hstack((target, target[:, -1].reshape(self.nx, 1)))
             u_guess = np.zeros((self.nu, self.control_horizon))
 
         # The iMPC Optimization Loop
@@ -325,9 +325,10 @@ class MPC:
             new_u = np.array(self.u.value)
 
             # If the maximum deviation between the old guess and the new solution is tiny,
-            # the non-linear approximations have converged. We can exit early.
+            # the non-linear approximations have converged. Success.
             if np.max(np.abs(new_x - x_guess)) < tolerance:
                 break
+
             # Update the guess for the next iteration
             x_guess = new_x
             u_guess = new_u

@@ -25,7 +25,7 @@
           pybullet
           cvxpy
           scipy
-          osqp
+          casadi
         ];
 
         # dev packages, add extra stuff here
@@ -37,6 +37,7 @@
             nbconvert
             black
             ruff
+            osqp
           ];
 
         python-demo = pkgs.python3.withPackages core-python-pkgs;
