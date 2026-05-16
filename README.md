@@ -72,3 +72,4 @@ The settings used for tuning the MPC controller are in the **[mpc_config](./mpc_
 * [erwincoumans - pybullet](https://pybullet.org/wordpress/)
 * [alexliniger - mpcc](https://github.com/alexliniger/MPCC) and his [paper](https://onlinelibrary.wiley.com/doi/abs/10.1002/oca.2123)
 * [arex18 - rocket-lander](https://github.com/arex18/rocket-lander)
+* [prl-mushr - mushr](https://github.com/prl-mushr/mushr_mujoco_ros) for the vehicle used

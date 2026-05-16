@@ -25,7 +25,6 @@
           pybullet
           cvxpy
           scipy
-          casadi
         ];
 
         # dev packages, add extra stuff here
@@ -38,6 +37,7 @@
             black
             ruff
             osqp
+            casadi
           ];
 
         python-demo = pkgs.python3.withPackages core-python-pkgs;
