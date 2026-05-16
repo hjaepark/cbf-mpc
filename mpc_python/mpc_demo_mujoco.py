@@ -12,7 +12,7 @@ import numpy.typing as npt
 import mujoco
 import mujoco.viewer
 from cvxpy_mpc import MPC, VehicleModel
-from cvxpy_mpc.utils import compute_path_from_wp, get_ref_trajectory
+from cvxpy_mpc.utils import compute_path_from_wp, get_ref_trajectory, compute_errors
 
 TARGET_VEL = 1.0
 T = 4.0
@@ -28,7 +28,6 @@ class SharedData:
         self.lock: threading.Lock = threading.Lock()
 
         # Core control & state
-        self.ctrl: npt.NDArray[np.float64] = np.zeros(2)
         self.state: npt.NDArray[np.float64] = np.zeros(4)
         self.goal_reached: bool = False
         self.is_active: bool = True
@@ -36,8 +35,6 @@ class SharedData:
         self.mpc_steer: float = 0.0
 
         # Telemetry & visualization
-        self.x_hist: list[float] = []
-        self.y_hist: list[float] = []
         self.x_mpc_world: npt.NDArray[np.float64] | None = None
         self.mpc_elapsed: float = 0.0
 
@@ -106,8 +103,6 @@ def controller_loop(
             shared.mpc_steer = control[1]
             shared.mpc_elapsed = elapsed
             shared.x_mpc_world = ego_to_global(pred_state, x_mpc)
-            shared.x_hist.append(current_state[0])
-            shared.y_hist.append(current_state[1])
 
         # Enforce loop frequency
         elapsed_total = time.time() - start_time
@@ -170,11 +165,14 @@ def draw_path(viewer: mujoco.viewer.MjViewer, path: npt.NDArray[np.float64]) -> 
 
 
 def draw_trail(
-    viewer: mujoco.viewer.MjViewer, x_hist: list[float], y_hist: list[float]
+    viewer: mujoco.viewer.MjViewer,
+    x_hist: list[float],
+    y_hist: list[float],
+    dowsample: int = 10,
 ) -> None:
     if len(x_hist) < 2:
         return
-    for i in range(len(x_hist) - 1):
+    for i in range(0, len(x_hist) - 1, dowsample):
         if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
             break
 
@@ -226,10 +224,7 @@ def main() -> None:
     d = mujoco.MjData(m)
     bid = body_id(m, "buddy")
 
-    d.qpos[0] = 0.0
-    d.qpos[1] = 0.3
-    d.qpos[2] = 0.1
-    d.qpos[3] = 1.0
+    d.qpos[:4] = [0.0, 0.3, 0.1, 1.0]
     mujoco.mj_forward(m, d)
 
     path = compute_path_from_wp(
@@ -245,6 +240,7 @@ def main() -> None:
         20.0,
     ]  # [Along-track, Cross-track, Velocity, Heading]
     actuation_cost = [10.0, 10.0]
+
     mpc = MPC(
         VehicleModel(),
         T,
@@ -258,12 +254,10 @@ def main() -> None:
     steer_jnt = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, "buddy_steering_wheel")
     steer_qaddr = m.jnt_qposadr[steer_jnt]
 
-    # Instantiate the shared data object
     shared = SharedData()
-
-    # Pass the shared object to the background controller thread
-    t = threading.Thread(target=controller_loop, args=(mpc, path, shared), daemon=True)
-    t.start()
+    mpc_thread = threading.Thread(
+        target=controller_loop, args=(mpc, path, shared), daemon=True
+    )
 
     with mujoco.viewer.launch_passive(m, d) as viewer:
         viewer.cam.lookat[:] = [0.0, 0.0, 0.0]
@@ -273,52 +267,87 @@ def main() -> None:
 
         fps = 60.0
         render_dt = 1.0 / fps
-        control = [0, 0]  # steer and speed for mujoco car
+
+        control = [0.0, 0.0]  # steer and speed
+        x_hist = []
+        y_hist = []
+        cte_hist = []
+        heading_error_hist = []
+        cte_rmse = -1
+        heading_rmse = -1
 
         input("\033[92mPress Enter to continue...\033[0m")
 
+        mpc_thread.start()
         sim_start_time = time.perf_counter()
-        try:
-            while viewer.is_running() and not shared.goal_reached:
 
-                # step the physics of mujoco
+        try:
+            while viewer.is_running():
+
+                # Check for completion
+                if shared.goal_reached:
+                    viewer.set_texts(
+                        [
+                            (
+                                None,
+                                None,
+                                f"GOAL REACHED\n"
+                                f"Final RMSE:   CTE {cte_rmse:.3f} m  |  heading {heading_rmse:.1f} deg\n",
+                                "",
+                            )
+                        ]
+                    )
+                    viewer.sync()
+                    print(
+                        "\nGoal reached! Close the viewer window or press CTRL-C to exit."
+                    )
+                    # Idle until the user closes the window or forces a KeyboardInterrupt
+                    while viewer.is_running():
+                        time.sleep(0.1)
+                    break
+
                 elapsed_real_time = time.perf_counter() - sim_start_time
+
+                # Step physics
                 while d.time < elapsed_real_time:
-                    # this value is held constant between MPC updates. (Zero order hold)
                     d.ctrl[:] = control
                     mujoco.mj_step(m, d)
 
-                # sync data with MPC thread
                 current_state = get_state(d, bid)
-                with shared.lock:
-                    # TODO: this would come from a proper state estimator
-                    shared.state[:] = current_state
 
+                # Sync with MPC Thread
+                with shared.lock:
+                    shared.state[:] = current_state
                     mpc_elapsed = shared.mpc_elapsed
                     mpc_accel = shared.mpc_accel
                     mpc_steer = shared.mpc_steer
                     x_mpc_world = shared.x_mpc_world
-                    local_x_hist = list(shared.x_hist)
-                    local_y_hist = list(shared.y_hist)
 
-                # update control for ZOH
+                # Log position etc...
+                x_hist.append(current_state[0])
+                y_hist.append(current_state[1])
+                cte, heading_err = compute_errors(current_state, path)
+                cte_hist.append(cte)
+                heading_error_hist.append(np.degrees(heading_err))
+                cte_rmse = np.sqrt(np.mean(np.square(cte_hist)))
+                heading_rmse = np.sqrt(np.mean(np.square(heading_error_hist)))
+
+                # Update Zero-Order Hold control
                 control[0] = mpc_steer
                 control[1] = current_state[2] + mpc_accel * DT
 
-                # Make camera follow the car
+                # Visuals
                 viewer.cam.lookat[:] = [current_state[0], current_state[1], 0.0]
-
-                # Update viz
                 viewer.user_scn.ngeom = 0
+
                 draw_path(viewer, path)
-                draw_trail(viewer, local_x_hist, local_y_hist)
+                draw_trail(viewer, x_hist, y_hist)
                 if x_mpc_world is not None:
                     draw_mpc_preview(viewer, x_mpc_world)
 
                 actual_steer = np.degrees(d.qpos[steer_qaddr])
-                goal_dist = np.sqrt(
-                    (d.xpos[bid][0] - path[0, -1]) ** 2
-                    + (d.xpos[bid][1] - path[1, -1]) ** 2
+                goal_dist = np.hypot(
+                    current_state[0] - path[0, -1], current_state[1] - path[1, -1]
                 )
 
                 viewer.set_texts(
@@ -329,41 +358,32 @@ def main() -> None:
                             f"MPC Demo\n"
                             f"state:  v {current_state[2]:.2f} m/s  |  steer {actual_steer:.1f} deg\n"
                             f"MPC:    accel {mpc_accel:.2f} m/s2  |  steer {np.degrees(mpc_steer):.1f} deg  |  {mpc_elapsed*1000:.0f} ms\n"
-                            f"goal:   {goal_dist:.2f} m\n"
-                            "",
+                            f"error:  CTE {cte:.3f} m  |  heading {np.degrees(heading_err):.1f} deg\n"
+                            f"RMSE:   CTE {cte_rmse:.3f} m  |  heading {heading_rmse:.1f} deg\n"
+                            f"goal:   {goal_dist:.2f} m\n",
                             "",
                         )
                     ]
                 )
-
                 viewer.sync()
 
-                # Sleep just enough to hit 60 FPS
+                # Frame limiting
                 time_until_next_frame = render_dt - (
                     time.perf_counter() - elapsed_real_time - sim_start_time
                 )
                 if time_until_next_frame > 0:
                     time.sleep(time_until_next_frame)
 
-            # Show end state
-            if shared.goal_reached:
-                viewer.set_texts([(None, None, "GOAL REACHED\n" "", "")])
-                viewer.sync()
-                print(
-                    "\nGoal reached! Press Enter to exit, or close the viewer window."
-                )
-                while viewer.is_running():
-                    if select.select([sys.stdin], [], [], 0.2)[0]:
-                        sys.stdin.readline()
-                        break
         except KeyboardInterrupt:
-            print("\nInterrupted by user")
+            print("\nInterrupted by user (CTRL-C). Shutting down...")
+
         finally:
-            # we do this to stop the mpc thread
+            # Signal the background thread to exit and wait for it
             with shared.lock:
                 shared.is_active = False
 
-        viewer.clear_texts()
+            if mpc_thread.is_alive():
+                mpc_thread.join(timeout=1.0)
 
 
 if __name__ == "__main__":

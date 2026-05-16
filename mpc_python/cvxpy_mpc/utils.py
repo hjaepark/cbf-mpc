@@ -122,3 +122,40 @@ def get_ref_trajectory(state, path, target_v, T, DT, ego_frame=True):
     xref[3, :] = fix_angle_reference(xref[3, :], xref[3, 0])
 
     return xref
+
+
+def compute_errors(current_state, path):
+    # 1. Find the closest waypoint index
+    dx = current_state[0] - path[0, :]
+    dy = current_state[1] - path[1, :]
+    distances = np.hypot(dx, dy)
+    idx = np.argmin(distances)
+
+    # 2. Determine segment direction for true cross-track projection
+    # If we are at the very last point, look backward, otherwise look forward
+    idx_next = idx - 1 if idx == path.shape[1] - 1 else idx + 1
+
+    # Segment vector (tangent of the track)
+    tx = path[0, idx_next] - path[0, idx]
+    ty = path[1, idx_next] - path[1, idx]
+    seg_len = np.hypot(tx, ty)
+
+    if seg_len > 1e-5:
+        # Normalize tangent vector
+        tx /= seg_len
+        ty /= seg_len
+
+        # Vector from waypoint to vehicle
+        vx = current_state[0] - path[0, idx]
+        vy = current_state[1] - path[1, idx]
+
+        # True Cross-Track Error is the perpendicular scalar projection (Using 2D Cross Product)
+        cte = np.abs(vx * ty - vy * tx)
+    else:
+        cte = distances[idx]
+
+    # 3. Heading Error (Normalized between -pi and pi)
+    target_heading = path[2, idx]
+    heading_err = (current_state[3] - target_heading + np.pi) % (2.0 * np.pi) - np.pi
+
+    return (cte, heading_err)
