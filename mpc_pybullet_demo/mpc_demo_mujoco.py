@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 import pathlib
 import threading
 import time
 
 import matplotlib.pyplot as plt
 import numpy as np
+import numpy.typing as npt
 
 import mujoco
 import mujoco.viewer
@@ -11,7 +14,7 @@ from cvxpy_mpc import MPC, VehicleModel
 from cvxpy_mpc.utils import compute_path_from_wp, get_ref_trajectory
 
 TARGET_VEL = 1.0
-T = 5.0
+T = 4.0
 DT = 0.2  # controller time step
 
 
@@ -20,28 +23,29 @@ DT = 0.2  # controller time step
 class SharedData:
     """Encapsulates all data shared between the Physics thread and MPC thread."""
 
-    def __init__(self):
-        self.lock = threading.Lock()
+    def __init__(self) -> None:
+        self.lock: threading.Lock = threading.Lock()
 
         # Core control & state
-        self.ctrl = np.zeros(2)  # [steering_rad, target_speed_mps]
-        self.state = np.zeros(4)  # [x, y, speed, yaw]
-        self.goal_reached = False
-        self.is_active = True
+        self.ctrl: npt.NDArray[np.float64] = np.zeros(2)
+        self.state: npt.NDArray[np.float64] = np.zeros(4)
+        self.goal_reached: bool = False
+        self.is_active: bool = True
 
         # Telemetry & visualization
-        self.x_hist = []
-        self.y_hist = []
-        self.x_mpc_world = None
+        self.x_hist: list[float] = []
+        self.y_hist: list[float] = []
+        self.x_mpc_world: npt.NDArray[np.float64] | None = None
 
         # HUD stats
-        self.mpc_elapsed = 0.0
-        self.mpc_accel = 0.0
-        self.mpc_steer = 0.0
+        self.mpc_elapsed: float = 0.0
+        self.mpc_accel: float = 0.0
+        self.mpc_steer: float = 0.0
 
 
-def controller_loop(mpc, path, shared):
-    """Runs continuously in the background at ~5Hz"""
+def controller_loop(
+    mpc: NonLinearMPC, path: npt.NDArray[np.float64], shared: SharedData
+) -> None:
 
     while True:
         start_time = time.time()
@@ -122,21 +126,23 @@ def controller_loop(mpc, path, shared):
         time.sleep(sleep_time)
 
 
-def body_id(model, name):
+def body_id(model: mujoco.MjModel, name: str) -> int:
     i = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
     if i == -1:
         raise ValueError(f"Body '{name}' not found")
     return i
 
 
-def get_state(data, bid):
+def get_state(data: mujoco.MjData, bid: int) -> npt.NDArray[np.float64]:
     rot = data.xmat[bid].reshape(3, 3)
     yaw = np.arctan2(rot[1, 0], rot[0, 0])
     speed = np.linalg.norm(data.qvel[0:2])
     return np.array([data.xpos[bid][0], data.xpos[bid][1], speed, yaw])
 
 
-def ego_to_global(state, x_mpc):
+def ego_to_global(
+    state: npt.NDArray[np.float64], x_mpc: npt.NDArray[np.float64]
+) -> npt.NDArray[np.float64]:
     traj = x_mpc[:2, :].copy()
     ct, st = np.cos(state[3]), np.sin(state[3])
     R = np.array([[ct, -st], [st, ct]])
@@ -146,8 +152,7 @@ def ego_to_global(state, x_mpc):
     return traj
 
 
-def draw_path(viewer, path):
-    """Draws the reference path"""
+def draw_path(viewer: mujoco.viewer.MjViewer, path: npt.NDArray[np.float64]) -> None:
     for i in range(path.shape[1] - 1):
         if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
             break
@@ -175,8 +180,9 @@ def draw_path(viewer, path):
         viewer.user_scn.ngeom += 1
 
 
-def draw_trail(viewer, x_hist, y_hist):
-    """Draws breadcrumbs using strict arrays."""
+def draw_trail(
+    viewer: mujoco.viewer.MjViewer, x_hist: list[float], y_hist: list[float]
+) -> None:
     step = max(1, len(x_hist) // 40)
     for i in range(0, len(x_hist), step):
         if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
@@ -197,8 +203,9 @@ def draw_trail(viewer, x_hist, y_hist):
         viewer.user_scn.ngeom += 1
 
 
-def draw_mpc_preview(viewer, x_mpc_world):
-    """Draws predicted horizon points using strict arrays."""
+def draw_mpc_preview(
+    viewer: mujoco.viewer.MjViewer, x_mpc_world: npt.NDArray[np.float64]
+) -> None:
     for i in range(x_mpc_world.shape[1]):
         if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
             break
@@ -219,7 +226,9 @@ def draw_mpc_preview(viewer, x_mpc_world):
         viewer.user_scn.ngeom += 1
 
 
-def plot_results(path, x_hist, y_hist):
+def plot_results(
+    path: npt.NDArray[np.float64], x_hist: list[float], y_hist: list[float]
+) -> None:
     plt.style.use("ggplot")
     plt.figure()
     plt.title("MPC Tracking Results")
@@ -235,7 +244,7 @@ def plot_results(path, x_hist, y_hist):
 
 
 # here we run the sim loop
-def main():
+def main() -> None:
     model_path = pathlib.Path(__file__).parent / "models" / "mushr" / "mush_nano.xml"
     m = mujoco.MjModel.from_xml_path(str(model_path))
     d = mujoco.MjData(m)
