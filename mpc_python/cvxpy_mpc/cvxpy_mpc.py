@@ -229,7 +229,7 @@ class MPC:
         prob = opt.Problem(opt.Minimize(cost), constr)
         return prob
 
-    def step(
+    def solve(
         self,
         initial_state: npt.NDArray[np.float64] | list[float],
         target: npt.NDArray[np.float64],

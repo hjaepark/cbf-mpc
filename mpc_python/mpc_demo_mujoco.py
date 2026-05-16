@@ -95,7 +95,7 @@ def controller_loop(
         pred_ego_state[0] += v * elapsed
         pred_ego_state[2] += a * elapsed
         pred_ego_state[3] += (v * np.tan(delta) / L) * elapsed
-        x_mpc, u_mpc = mpc.step(pred_ego_state, target, verbose=False)
+        x_mpc, u_mpc = mpc.solve(pred_ego_state, target, verbose=False)
 
         # Extract the immediate next optimal control actions
         control = (u_mpc[0, 0], u_mpc[1, 0])

@@ -51,11 +51,15 @@ This environment also includes `jupyter lab` to experiment with the notebooks.
 
 ## Results
 
-MuJoCo car model is from: *https://github.com/prl-mushr/mushr_mujoco_ros*:
-![](img/demo-mujoco.gif)
+<figure>
+  <img src="img/demo-mujoco.gif" width="500" />
+  <figcaption>MuJoCo simulation with the mushr car model</figcaption>
+</figure>
 
-Headless toy demo:
-![](img/demo.gif)
+<figure>
+  <img src="img/demo.gif" width="500" />
+  <figcaption>Headless toy demo with scipy.odeint plant</figcaption>
+</figure>
 
 ## Notebooks
 
