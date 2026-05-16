@@ -52,7 +52,7 @@ This environment also includes `jupyter lab` to experiment with the notebooks.
 ## Results
 
 MuJoCo car model is from: *https://github.com/prl-mushr/mushr_mujoco_ros*:
-![](img/mujoco-demo.gif)
+![](img/demo-mujoco.gif)
 
 Headless toy demo:
 ![](img/demo.gif)
