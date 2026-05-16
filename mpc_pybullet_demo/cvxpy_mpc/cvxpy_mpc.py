@@ -53,6 +53,9 @@ class MPC:
         )
 
         # CVXPY params (placeholder for run-time data)
+        # We use params because raw values force CVXPY to re-parse the problem in Python every loop (slow).
+        # Using dedicated Parameters allows CVXPY to lock down the matrix structure at startup.
+        # At runtime, we only update the parameter '.value' (fast).
         self.initial_state_param: opt.Parameter = opt.Parameter(self.nx, name="x0")
         self.last_cmd_param: opt.Parameter = opt.Parameter(
             self.nu, name="last_applied_command"
@@ -70,7 +73,8 @@ class MPC:
             opt.Parameter(self.nx, name=f"C_{k}") for k in range(self.control_horizon)
         ]
 
-        # TARGET PARAMS
+        # TARGET params
+        # done this way to help make the cross-track error Disciplined Parametrized Programming (DPP) compliant...
         self.cos_param = opt.Parameter(self.control_horizon)
         self.sin_param = opt.Parameter(self.control_horizon)
         self.p_along_ref_param = opt.Parameter(self.control_horizon)
@@ -79,7 +83,6 @@ class MPC:
         self.theta_ref_param = opt.Parameter(self.control_horizon)
 
         # optimised vars
-        # used for constrains and IMPC logic
         self.prev_cmd: npt.NDArray[np.float64] | None = None
         self.prev_trajectory: npt.NDArray[np.float64] | None = None
 
@@ -266,26 +269,24 @@ class MPC:
         self.v_ref_param.value = v_ref
         self.theta_ref_param.value = theta_ref
 
-        ## compute system matrices
-        # Option 1: The state linearization is performed **once** (LTI) around the starting condition to simplify the controller.
-        # This approximation gets more inaccurate as the controller looks at the future, as the system changes (a lot!) along the trajectory
+        # To compute the system matices for the LTV system, we may initially think to linearize the vehicle's nonlinear kinematics (like sin/cos/tan
+        # steering math) **once** around the current state.
         # A, B, C = self.compute_linear_model_matrices(initial_state, prev_cmd)
-        # you will see the prediction is MUCH less accurate...
-
-        # Option 2: Feedback Linearization along a Reference.
-        # x_bar is approximated as the target state
-        # u_bar can be approximated as zero or a feedforward hold
-
-        # option 3: Iterative MPC (iMPC).
-        # Instead of linearising based on the track, take the optimal trajectory calculated by the MPC in the previous control cycle
-        # shift it forward by one timestep, and use that predicted trajectory as the linearization baseline (hence ITERATIVE).
-        # Because the vehicle's actual movement matches its own recent predictions much closer than the "ideal raw path", the predicition is further improved
+        # It creates a flat tangent
+        # line and assumes the vehicle physics will behave linearly for the next N steps.
+        # This linear approximation gets more inaccurate as the controller looks at the future
+        # , as the system changes (a lot!) along the trajectory, think sharp turns etc..
+        # You will see the prediction is MUCH less accurate as the horizon grows...
         #
-        # It looks like this:
-        # 1. Take predicted trajectory from the last frame.
-        # 2. Linearize physics around THAT trajectory (not the path).
-        # 3. Solve optimization.
-        # 4. Save the new output trajectory to use for linearization in the next frame.
+        #
+        # In iMPC instead of linearizing once at the start, we make an initial guess of
+        # the entire future trajectory and linearize at *every individual step* along that guessed path.
+        #
+        # After solving the optimization problem, we update the guessed trajectory,
+        # re-linearizing around the new path, we repeat this up to N times.
+        #
+        # Eventually the linear models will converges onto the true, curved, non-linear physics of
+        # the vehicle before a command is ever sent to the actuators.
 
         # Form the Initial Guess for the iMPC loop
         if self.prev_trajectory is not None and self.prev_cmd is not None:
@@ -295,6 +296,7 @@ class MPC:
             u_guess = np.roll(self.prev_cmd, -1, axis=1)
             u_guess[:, -1] = self.prev_cmd[:, -1]
         else:
+            # first iteration guess: pretend the vehicle follows the reference perfectly
             x_guess = np.hstack((target, target[:, -1].reshape(self.nx, 1)))
             u_guess = np.zeros((self.nu, self.control_horizon))
 
