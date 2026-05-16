@@ -22,7 +22,6 @@
           numpy
           matplotlib
           mujoco
-          pybullet
           cvxpy
           scipy
         ];
@@ -64,11 +63,11 @@
             shellHook = ''
               echo "demo shell — bare deps to run the sim"
               echo ""
-              echo "Run with GUI:"
-              echo "  nixGL python mpc_pybullet_demo/mpc_demo_pybullet.py"
+              echo "Run with GUI (MuJoCo):"
+              echo "  nixGL python mpc_python/mpc_demo_mujoco.py"
               echo ""
               echo "Run without GUI:"
-              echo "  python mpc_pybullet_demo/mpc_demo_nosim.py"
+              echo "  python mpc_python/mpc_demo_nosim.py"
             '';
           };
 
@@ -81,11 +80,11 @@
             shellHook = ''
               echo "full dev shell — deps + jupyter + dev tools"
               echo ""
-              echo "Run with GUI:"
-              echo "  nixGL python mpc_pybullet_demo/mpc_demo_pybullet.py"
+              echo "Run with GUI (MuJoCo):"
+              echo "  nixGL python mpc_python/mpc_demo_mujoco.py"
               echo ""
               echo "Run without GUI:"
-              echo "  python mpc_pybullet_demo/mpc_demo_nosim.py"
+              echo "  python mpc_python/mpc_demo_nosim.py"
               echo ""
               echo "Notebooks: jupyter lab"
               echo "Lint: ruff check ."

@@ -44,7 +44,7 @@ class SharedData:
 
 
 def controller_loop(
-    mpc: NonLinearMPC, path: npt.NDArray[np.float64], shared: SharedData
+    mpc: MPC, path: npt.NDArray[np.float64], shared: SharedData
 ) -> None:
 
     while True:
@@ -326,6 +326,9 @@ def main() -> None:
                     local_x_hist = list(shared.x_hist)
                     local_y_hist = list(shared.y_hist)
                     current_speed = shared.state[2]
+
+                # Make camera follow the car
+                viewer.cam.lookat[:] = [shared.state[0], shared.state[1], 0.0]
 
                 # Update viz
                 viewer.user_scn.ngeom = 0
