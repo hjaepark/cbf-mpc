@@ -73,6 +73,7 @@ class MPC:
 
         # TARGET params
         # done this way to help make the cross-track error Disciplined Parametrized Programming (DPP) compliant...
+        # see https://www.cvxpy.org/tutorial/dpp/index.html
         self.cos_param = opt.Parameter(self.control_horizon)
         self.sin_param = opt.Parameter(self.control_horizon)
         self.p_along_ref_param = opt.Parameter(self.control_horizon)
