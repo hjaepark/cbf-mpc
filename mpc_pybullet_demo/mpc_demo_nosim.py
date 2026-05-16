@@ -1,9 +1,12 @@
 #! /usr/bin/env python
 
+from __future__ import annotations
+
 import sys
 
 import matplotlib.pyplot as plt
 import numpy as np
+import numpy.typing as npt
 from cvxpy_mpc import MPC, VehicleModel
 from cvxpy_mpc.utils import compute_path_from_wp, get_ref_trajectory
 from scipy.integrate import odeint
@@ -19,60 +22,53 @@ SIM_START_H = 0.0
 TARGET_VEL = 1.0  # m/s
 T = 5  # Prediction Horizon [s]
 DT = 0.2  # discretization step [s]
-L = 0.3  # vehicle wheelbase [m]
 
 
 # Classes
 class MPCSim:
-    def __init__(self):
+    def __init__(self) -> None:
         # State of the robot [x,y,v, heading]
-        self.state = np.array([SIM_START_X, SIM_START_Y, SIM_START_V, SIM_START_H])
+        self.state: npt.NDArray[np.float64] = np.array(
+            [SIM_START_X, SIM_START_Y, SIM_START_V, SIM_START_H]
+        )
 
         # helper variable to keep track of mpc output
-        # starting condition is 0,0
-        self.control = np.zeros(2)
+        self.control: npt.NDArray[np.float64] = np.zeros(2)
 
-        self.K = int(T / DT)
+        self.K: int = int(T / DT)
 
         Q = [20, 20, 10, 20]  # state error cost
         Qf = [30, 30, 30, 30]  # state final error cost
         R = [10, 10]  # input cost
         P = [10, 10]  # input rate of change cost
-        self.mpc = MPC(VehicleModel(), T, DT, Q, Qf, R, P)
+        self.mpc: MPC = MPC(VehicleModel(), T, DT, Q, Qf, R, P)
 
         # Path from waypoint interpolation
-        self.path = compute_path_from_wp(
+        self.path: npt.NDArray[np.float64] = compute_path_from_wp(
             [0, 3, 4, 6, 10, 12, 13, 13, 6, 1, 0],
             [0, 0, 2, 4, 3, 3, -1, -2, -6, -2, -2],
             0.05,
         )
 
         # Helper variables to keep track of the sim
-        self.sim_time = 0
-        self.x_history = []
-        self.y_history = []
-        self.v_history = []
-        self.h_history = []
-        self.a_history = []
-        self.d_history = []
-        self.optimized_trajectory = None
+        self.sim_time: float = 0
+        self.x_history: list[float] = []
+        self.y_history: list[float] = []
+        self.v_history: list[float] = []
+        self.h_history: list[float] = []
+        self.a_history: list[float] = []
+        self.d_history: list[float] = []
+        self.optimized_trajectory: npt.NDArray[np.float64] | None = None
 
         # Initialise plot
         plt.style.use("ggplot")
-        self.fig = plt.figure()
+        self.fig: plt.Figure = plt.figure()
         plt.ion()
         plt.show()
 
-    def ego_to_global(self, mpc_out):
-        """
-        transforms optimized trajectory XY points from ego(car) reference
-        into global(map) frame
-
-        Args:
-            mpc_out (array-like): a matrix of size nx * K, where each column is the state of the vehicle at time T in ego frame
-        Returns:
-            trajectory (array-like): a matrix of sizee 2 * K where each colum is the [X, Y] robot position in the world
-        """
+    def ego_to_global(
+        self, mpc_out: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
         trajectory = np.zeros((2, mpc_out.shape[1]))
         trajectory[:, :] = mpc_out[0:2, :]
         Rotm = np.array(
@@ -86,7 +82,7 @@ class MPCSim:
         trajectory[1, :] += self.state[1]
         return trajectory
 
-    def run(self):
+    def run(self) -> None:
         self.plot_sim()
         input("Press Enter to continue...")
         try:
@@ -109,12 +105,7 @@ class MPCSim:
 
                 # dynamycs w.r.t robot frame
                 curr_state = np.array([0, 0, self.state[2], 0])
-                x_mpc, u_mpc = self.mpc.step(
-                    curr_state,
-                    target,
-                    self.control,
-                    verbose=False,
-                )
+                x_mpc, u_mpc = self.mpc.step(curr_state, target, verbose=False)
                 # print("CVXPY Optimization Time: {:.4f}s".format(time.time()-start))
                 # only the first one is used to advance the simulation
 
@@ -129,7 +120,14 @@ class MPCSim:
         except KeyboardInterrupt:
             pass
 
-    def predict_next_state(self, state, u, dt):
+    def predict_next_state(
+        self,
+        state: npt.NDArray[np.float64],
+        u: npt.NDArray[np.float64] | list[float],
+        dt: float,
+    ) -> npt.NDArray[np.float64]:
+        L = self.mpc.vehicle.wheelbase
+
         def kinematics_model(x, t, u):
             dxdt = x[2] * np.cos(x[3])
             dydt = x[2] * np.sin(x[3])
@@ -143,7 +141,7 @@ class MPCSim:
         new_state = odeint(kinematics_model, state, tspan, args=(u[:],))[1]
         return new_state
 
-    def plot_sim(self):
+    def plot_sim(self) -> None:
         self.sim_time = self.sim_time + DT
         self.x_history.append(self.state[0])
         self.y_history.append(self.state[1])
@@ -154,9 +152,9 @@ class MPCSim:
 
         plt.clf()
 
-        grid = plt.GridSpec(2, 3)
+        grid = plt.GridSpec(3, 3)
 
-        plt.subplot(grid[0:2, 0:2])
+        plt.subplot(grid[0:3, 0:2])
         plt.title(
             "MPC Simulation \n" + "Simulation elapsed time {}s".format(self.sim_time)
         )
@@ -230,20 +228,22 @@ class MPCSim:
         plt.xticks(locs[1:], locs[1:] * DT)
         plt.xlabel("t [s]")
 
+        plt.subplot(grid[2, 2])
+        plt.plot(self.v_history, c="tab:blue", label="vehicle speed")
+        plt.axhline(y=TARGET_VEL, c="tab:orange", linestyle="--", label="target speed")
+        plt.ylabel("v(t) [m/s]")
+        locs, _ = plt.xticks()
+        plt.xticks(locs[1:], locs[1:] * DT)
+        plt.xlabel("t [s]")
+        plt.legend(loc="lower right")
+
         plt.tight_layout()
 
         plt.draw()
         plt.pause(0.1)
 
 
-def plot_car(x, y, yaw):
-    """
-
-    Args:
-        x ():
-        y ():
-        yaw ():
-    """
+def plot_car(x: float, y: float, yaw: float) -> None:
     LENGTH = 0.5  # [m]
     WIDTH = 0.25  # [m]
     OFFSET = LENGTH  # [m]
@@ -267,7 +267,7 @@ def plot_car(x, y, yaw):
     )
 
 
-def do_sim():
+def do_sim() -> None:
     sim = MPCSim()
     try:
         sim.run()
