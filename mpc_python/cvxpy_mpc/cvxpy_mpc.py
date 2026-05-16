@@ -6,8 +6,6 @@ import numpy.typing as npt
 
 from .vehicle_model import VehicleModel
 
-np.seterr(divide="ignore", invalid="ignore")
-
 
 class MPC:
     def __init__(
@@ -241,11 +239,6 @@ class MPC:
         assert len(initial_state) == self.nx
         assert target.shape == (self.nx, self.control_horizon)
 
-        # update the parameter values
-        self.initial_state_param.value = np.array(initial_state)
-        self.last_cmd_param.value = (
-            self.prev_cmd[:, 0] if self.prev_cmd is not None else np.zeros(self.nu)
-        )
         self.initial_state_param.value = np.array(initial_state)
         self.last_cmd_param.value = (
             self.prev_cmd[:, 0] if self.prev_cmd is not None else np.zeros(self.nu)

@@ -92,8 +92,7 @@ def controller_loop(
 
         # Integrate physics forward in ego space
         pred_ego_state = [0.0, 0.0, v, 0.0]
-        pred_ego_state[0] += v * np.cos(theta) * elapsed
-        pred_ego_state[1] += v * np.sin(theta) * elapsed
+        pred_ego_state[0] += v * elapsed
         pred_ego_state[2] += a * elapsed
         pred_ego_state[3] += (v * np.tan(delta) / L) * elapsed
         x_mpc, u_mpc = mpc.step(pred_ego_state, target, verbose=False)
