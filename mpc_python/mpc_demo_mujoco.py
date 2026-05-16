@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import pathlib
+import select
+import sys
 import threading
 import time
 
-import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
 
@@ -31,16 +32,14 @@ class SharedData:
         self.state: npt.NDArray[np.float64] = np.zeros(4)
         self.goal_reached: bool = False
         self.is_active: bool = True
+        self.mpc_accel: float = 0.0
+        self.mpc_steer: float = 0.0
 
         # Telemetry & visualization
         self.x_hist: list[float] = []
         self.y_hist: list[float] = []
         self.x_mpc_world: npt.NDArray[np.float64] | None = None
-
-        # HUD stats
         self.mpc_elapsed: float = 0.0
-        self.mpc_accel: float = 0.0
-        self.mpc_steer: float = 0.0
 
 
 def controller_loop(
@@ -55,7 +54,7 @@ def controller_loop(
             if not shared.is_active or shared.goal_reached:
                 break
             current_state = shared.state.copy()  # Global [X, Y, V, Theta]
-            last_control = (shared.mpc_accel, shared.mpc_steer)  # [Accel, Steer]
+            last_control = (shared.mpc_accel, shared.mpc_steer)
             elapsed = shared.mpc_elapsed
 
         # Check goal using absolute global coordinates
@@ -85,7 +84,7 @@ def controller_loop(
         pred_state[2] += a * elapsed
         pred_state[3] += (v * np.tan(delta) / L) * elapsed
 
-        # NOTE: we convert the state in ego frame ans we use a ego target
+        # NOTE: we convert the state in ego frame and we use a ego target
         # so we the optimization problem is a bit easier and we save some solver time
         # Get reference trajectory
         target = get_ref_trajectory(pred_state, path, TARGET_VEL, T, DT)
@@ -101,17 +100,8 @@ def controller_loop(
         control = (u_mpc[0, 0], u_mpc[1, 0])
         elapsed = time.time() - start_time
 
-        # Format control values for MuJoCo actuator expectations
-        new_ctrl = np.array(
-            [
-                control[1],  # Target steer angle (rad)
-                current_state[2] + control[0] * DT,  # Target velocity (m/s)
-            ]
-        )
-
         # Safely push results back to the shared object
         with shared.lock:
-            shared.ctrl[:] = new_ctrl
             shared.mpc_accel = control[0]
             shared.mpc_steer = control[1]
             shared.mpc_elapsed = elapsed
@@ -182,23 +172,27 @@ def draw_path(viewer: mujoco.viewer.MjViewer, path: npt.NDArray[np.float64]) -> 
 def draw_trail(
     viewer: mujoco.viewer.MjViewer, x_hist: list[float], y_hist: list[float]
 ) -> None:
-    step = max(1, len(x_hist) // 40)
-    for i in range(0, len(x_hist), step):
+    if len(x_hist) < 2:
+        return
+    for i in range(len(x_hist) - 1):
         if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
             break
 
-        # next geometry slot
         g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
         alpha = (i + 1) / len(x_hist) * 0.8
 
+        p1 = np.array([x_hist[i], y_hist[i], 0.005], dtype=np.float64)
+        p2 = np.array([x_hist[i + 1], y_hist[i + 1], 0.005], dtype=np.float64)
+
         mujoco.mjv_initGeom(
             g,
-            type=mujoco.mjtGeom.mjGEOM_SPHERE,
-            size=np.array([0.025, 0.0, 0.0], dtype=np.float64),
-            pos=np.array([x_hist[i], y_hist[i], 0.005], dtype=np.float64),
+            type=mujoco.mjtGeom.mjGEOM_CAPSULE,
+            size=np.array([0.02, 0.0, 0.0], dtype=np.float64),
+            pos=np.zeros(3, dtype=np.float64),
             mat=np.eye(3).ravel(),
             rgba=np.array([1, 0, 0, alpha], dtype=np.float32),
         )
+        mujoco.mjv_connector(g, mujoco.mjtGeom.mjGEOM_CAPSULE, 0.02, p1, p2)
         viewer.user_scn.ngeom += 1
 
 
@@ -223,23 +217,6 @@ def draw_mpc_preview(
             rgba=np.array([0, 1, 0, 0.6], dtype=np.float32),
         )
         viewer.user_scn.ngeom += 1
-
-
-def plot_results(
-    path: npt.NDArray[np.float64], x_hist: list[float], y_hist: list[float]
-) -> None:
-    plt.style.use("ggplot")
-    plt.figure()
-    plt.title("MPC Tracking Results")
-    plt.plot(
-        path[0, :], path[1, :], c="tab:orange", marker=".", label="reference track"
-    )
-    plt.plot(
-        x_hist, y_hist, c="tab:blue", marker=".", alpha=0.5, label="vehicle trajectory"
-    )
-    plt.axis("equal")
-    plt.legend()
-    plt.show()
 
 
 # here we run the sim loop
@@ -296,6 +273,8 @@ def main() -> None:
 
         fps = 60.0
         render_dt = 1.0 / fps
+        control = [0, 0]  # steer and speed for mujoco car
+
         input("\033[92mPress Enter to continue...\033[0m")
 
         sim_start_time = time.perf_counter()
@@ -305,18 +284,15 @@ def main() -> None:
                 # step the physics of mujoco
                 elapsed_real_time = time.perf_counter() - sim_start_time
                 while d.time < elapsed_real_time:
-
-                    # Apply controls right before the step
-                    with shared.lock:
-                        # this value is held constant between MPC updates. (Zero order hold)
-                        d.ctrl[:] = shared.ctrl[:]
-
+                    # this value is held constant between MPC updates. (Zero order hold)
+                    d.ctrl[:] = control
                     mujoco.mj_step(m, d)
 
                 # sync data with MPC thread
+                current_state = get_state(d, bid)
                 with shared.lock:
                     # TODO: this would come from a proper state estimator
-                    shared.state[:] = get_state(d, bid)
+                    shared.state[:] = current_state
 
                     mpc_elapsed = shared.mpc_elapsed
                     mpc_accel = shared.mpc_accel
@@ -324,10 +300,13 @@ def main() -> None:
                     x_mpc_world = shared.x_mpc_world
                     local_x_hist = list(shared.x_hist)
                     local_y_hist = list(shared.y_hist)
-                    current_speed = shared.state[2]
+
+                # update control for ZOH
+                control[0] = mpc_steer
+                control[1] = current_state[2] + mpc_accel * DT
 
                 # Make camera follow the car
-                viewer.cam.lookat[:] = [shared.state[0], shared.state[1], 0.0]
+                viewer.cam.lookat[:] = [current_state[0], current_state[1], 0.0]
 
                 # Update viz
                 viewer.user_scn.ngeom = 0
@@ -348,9 +327,10 @@ def main() -> None:
                             None,
                             None,
                             f"MPC Demo\n"
-                            f"state:  v {current_speed:.2f} m/s  |  steer {actual_steer:.1f} deg\n"
-                            f"MPC:    accel {mpc_accel:.2f} m/s^2  |  steer {np.degrees(mpc_steer):.1f} deg  |  {mpc_elapsed*1000:.0f} ms\n"
-                            f"goal:   {goal_dist:.2f} m",
+                            f"state:  v {current_state[2]:.2f} m/s  |  steer {actual_steer:.1f} deg\n"
+                            f"MPC:    accel {mpc_accel:.2f} m/s2  |  steer {np.degrees(mpc_steer):.1f} deg  |  {mpc_elapsed*1000:.0f} ms\n"
+                            f"goal:   {goal_dist:.2f} m\n"
+                            "",
                             "",
                         )
                     ]
@@ -367,22 +347,23 @@ def main() -> None:
 
             # Show end state
             if shared.goal_reached:
-                viewer.set_texts([(None, None, "GOAL REACHED", "")])
+                viewer.set_texts([(None, None, "GOAL REACHED\n" "", "")])
                 viewer.sync()
-                time.sleep(1.5)
+                print(
+                    "\nGoal reached! Press Enter to exit, or close the viewer window."
+                )
+                while viewer.is_running():
+                    if select.select([sys.stdin], [], [], 0.2)[0]:
+                        sys.stdin.readline()
+                        break
+        except KeyboardInterrupt:
+            print("\nInterrupted by user")
         finally:
-            # handles user closing the GUI window
+            # we do this to stop the mpc thread
             with shared.lock:
                 shared.is_active = False
 
         viewer.clear_texts()
-
-    # Final plot (grab the history one last time)
-    with shared.lock:
-        final_x_hist = list(shared.x_hist)
-        final_y_hist = list(shared.y_hist)
-
-    plot_results(path, final_x_hist, final_y_hist)
 
 
 if __name__ == "__main__":
