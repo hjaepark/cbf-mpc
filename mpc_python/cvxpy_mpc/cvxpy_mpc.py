@@ -168,21 +168,24 @@ class MPC:
                 + self.cos_param[k] * self.x[1, k]
                 - self.p_cross_ref_param[k]
             )
-            q_along_track, q_cross_track, q_v, q_theta = (
-                self.Q[0, 0],
-                self.Q[1, 1],
-                self.Q[2, 2],
-                self.Q[3, 3],
+            e = opt.vstack(
+                [
+                    e_along,
+                    e_cross,
+                    self.x[2, k] - self.v_ref_param[k],
+                    self.x[3, k] - self.theta_ref_param[k],
+                ]
             )
-
-            # Use opt.square instead of cp.quad_form
-            cost += q_along_track * opt.square(e_along)
-            cost += q_cross_track * opt.square(e_cross)
-            cost += q_v * opt.square(self.x[2, k] - self.v_ref_param[k])
-            cost += q_theta * opt.square(self.x[3, k] - self.theta_ref_param[k])
+            cost += opt.quad_form(e, self.Q)
 
             # Actuation magnitude cost
             cost += opt.quad_form(self.u[:, k], self.R)
+
+            # Actuation rate cost
+            if k == 0:
+                cost += opt.quad_form(self.u[:, 0] - self.last_cmd_param, self.Rr)
+            else:
+                cost += opt.quad_form(self.u[:, k] - self.u[:, k - 1], self.Rr)
 
             constr += [opt.abs(self.u[0, k]) <= self.vehicle.max_acc]
             constr += [opt.abs(self.u[1, k]) <= self.vehicle.max_steer]
@@ -199,16 +202,15 @@ class MPC:
             - self.p_cross_ref_param[-1]
         )
 
-        q_along_track, q_cross_track, q_v, q_theta = (
-            self.Qf[0, 0],
-            self.Qf[1, 1],
-            self.Qf[2, 2],
-            self.Qf[3, 3],
+        e_f = opt.vstack(
+            [
+                e_along_f,
+                e_cross_f,
+                self.x[2, -1] - self.v_ref_param[-1],
+                self.x[3, -1] - self.theta_ref_param[-1],
+            ]
         )
-        cost += q_along_track * opt.square(e_along_f)
-        cost += q_cross_track * opt.square(e_cross_f)
-        cost += q_v * opt.square(self.x[2, -1] - self.v_ref_param[-1])
-        cost += q_theta * opt.square(self.x[3, -1] - self.theta_ref_param[-1])
+        cost += opt.quad_form(e_f, self.Qf)
 
         # Initial state
         constr += [self.x[:, 0] == self.initial_state_param]
