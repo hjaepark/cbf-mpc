@@ -1,8 +1,13 @@
 import numpy as np
+import numpy.typing as npt
 from scipy.interpolate import splprep, splev
 
 
-def compute_path_from_wp(start_xp, start_yp, step=0.1):
+def compute_path_from_wp(
+    start_xp: list[float] | npt.NDArray[np.float64],
+    start_yp: list[float] | npt.NDArray[np.float64],
+    step: float = 0.1,
+) -> npt.NDArray[np.float64]:
     """
     Generates a physically drivable, smooth C2 continuous path.
     """
@@ -30,7 +35,9 @@ def compute_path_from_wp(start_xp, start_yp, step=0.1):
     return np.vstack((final_xp, final_yp, theta))
 
 
-def get_nn_idx(state, path):
+def get_nn_idx(
+    state: npt.NDArray[np.float64], path: npt.NDArray[np.float64]
+) -> int:
     """
     Finds the index of the closest element
 
@@ -46,10 +53,11 @@ def get_nn_idx(state, path):
     dist = np.hypot(dx, dy)
     nn_idx = np.argmin(dist)
     try:
-        v = [
+        v = np.array([
             path[0, nn_idx + 1] - path[0, nn_idx],
             path[1, nn_idx + 1] - path[1, nn_idx],
-        ]
+        ])
+        assert np.linalg.norm(v) > 0, "zero-length path segment"
         v /= np.linalg.norm(v)
         d = [path[0, nn_idx] - state[0], path[1, nn_idx] - state[1]]
         if np.dot(d, v) > 0:
@@ -61,7 +69,14 @@ def get_nn_idx(state, path):
     return target_idx
 
 
-def get_ref_trajectory(state, path, target_v, T, DT, ego_frame=True):
+def get_ref_trajectory(
+    state: npt.NDArray[np.float64],
+    path: npt.NDArray[np.float64],
+    target_v: float,
+    T: float,
+    DT: float,
+    ego_frame: bool = True,
+) -> npt.NDArray[np.float64]:
     """
     Args:
         state (array-like): state of the vehicle in global frame [x, y, v, heading]
@@ -125,8 +140,8 @@ def get_ref_trajectory(state, path, target_v, T, DT, ego_frame=True):
 
 
 def ego_to_global(
-    state: np.ndarray[np.float64], x_mpc: np.ndarray[np.float64]
-) -> np.ndarray[np.float64]:
+    state: npt.NDArray[np.float64], x_mpc: npt.NDArray[np.float64]
+) -> npt.NDArray[np.float64]:
     traj = x_mpc[:2, :].copy()
     ct, st = np.cos(state[3]), np.sin(state[3])
     R = np.array([[ct, -st], [st, ct]])
@@ -136,7 +151,10 @@ def ego_to_global(
     return traj
 
 
-def compute_errors(current_state, path):
+def compute_errors(
+    current_state: npt.NDArray[np.float64], path: npt.NDArray[np.float64]
+) -> tuple[float, float]:
+    assert path.shape[1] >= 2, "path must have at least 2 points"
     # 1. Find the closest waypoint index
     dx = current_state[0] - path[0, :]
     dy = current_state[1] - path[1, :]
