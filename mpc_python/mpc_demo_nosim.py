@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
 from cvxpy_mpc import MPC, VehicleModel
-from cvxpy_mpc.utils import compute_path_from_wp, get_ref_trajectory
+from cvxpy_mpc.utils import compute_path_from_wp, ego_to_global, get_ref_trajectory
 from scipy.integrate import odeint
 
 # Robot Starting position
@@ -152,22 +152,6 @@ class MPCSim:
         plt.ion()
         plt.show()
 
-    def ego_to_global(
-        self, mpc_out: npt.NDArray[np.float64]
-    ) -> npt.NDArray[np.float64]:
-        trajectory = np.zeros((2, mpc_out.shape[1]))
-        trajectory[:, :] = mpc_out[0:2, :]
-        Rotm = np.array(
-            [
-                [np.cos(self.state[3]), np.sin(self.state[3])],
-                [-np.sin(self.state[3]), np.cos(self.state[3])],
-            ]
-        )
-        trajectory = (trajectory.T.dot(Rotm)).T
-        trajectory[0, :] += self.state[0]
-        trajectory[1, :] += self.state[1]
-        return trajectory
-
     def run(self) -> None:
         self.plot_sim()
         input("Press Enter to continue...")
@@ -197,7 +181,7 @@ class MPCSim:
 
                 # Convert MPC preview from ego->world BEFORE advancing state,
                 # so it's anchored to the state it was computed for
-                self.optimized_trajectory = self.ego_to_global(x_mpc)
+                self.optimized_trajectory = ego_to_global(self.state, x_mpc)
 
                 self.state = self.predict_next_state(
                     self.state, [self.control[0], self.control[1]], DT

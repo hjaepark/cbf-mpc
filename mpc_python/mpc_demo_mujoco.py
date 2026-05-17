@@ -12,7 +12,12 @@ import numpy.typing as npt
 import mujoco
 import mujoco.viewer
 from cvxpy_mpc import MPC, VehicleModel
-from cvxpy_mpc.utils import compute_path_from_wp, get_ref_trajectory, compute_errors
+from cvxpy_mpc.utils import (
+    compute_path_from_wp,
+    compute_errors,
+    ego_to_global,
+    get_ref_trajectory,
+)
 
 TARGET_VEL = 1.0
 T = 4.0
@@ -124,18 +129,6 @@ def get_state(data: mujoco.MjData, bid: int) -> npt.NDArray[np.float64]:
     return np.array([data.xpos[bid][0], data.xpos[bid][1], speed, yaw])
 
 
-def ego_to_global(
-    state: npt.NDArray[np.float64], x_mpc: npt.NDArray[np.float64]
-) -> npt.NDArray[np.float64]:
-    traj = x_mpc[:2, :].copy()
-    ct, st = np.cos(state[3]), np.sin(state[3])
-    R = np.array([[ct, -st], [st, ct]])
-    traj = R @ traj
-    traj[0, :] += state[0]
-    traj[1, :] += state[1]
-    return traj
-
-
 def draw_path(viewer: mujoco.viewer.MjViewer, path: npt.NDArray[np.float64]) -> None:
     for i in range(path.shape[1] - 1):
         if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
@@ -168,11 +161,11 @@ def draw_trail(
     viewer: mujoco.viewer.MjViewer,
     x_hist: list[float],
     y_hist: list[float],
-    dowsample: int = 10,
+    downsample: int = 10,
 ) -> None:
     if len(x_hist) < 2:
         return
-    for i in range(0, len(x_hist) - 1, dowsample):
+    for i in range(0, len(x_hist) - 1, downsample):
         if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
             break
 

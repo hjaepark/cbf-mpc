@@ -22,21 +22,20 @@ class MPC:
         self.nu: int = 2
 
         if len(state_cost) != self.nx:
-            raise ValueError(f"State Error cost matrix shuld be of size {self.nx}")
+            raise ValueError(f"State Error cost matrix should be of size {self.nx}")
         if len(final_state_cost) != self.nx:
-            raise ValueError(f"End State Error cost matrix shuld be of size {self.nx}")
+            raise ValueError(f"End State Error cost matrix should be of size {self.nx}")
         if len(input_cost) != self.nu:
-            raise ValueError(f"Control Effort cost matrix shuld be of size {self.nu}")
+            raise ValueError(f"Control Effort cost matrix should be of size {self.nu}")
         if len(input_rate_cost) != self.nu:
             raise ValueError(
-                f"Control Effort Difference cost matrix shuld be of size {self.nu}"
+                f"Control Effort Difference cost matrix should be of size {self.nu}"
             )
 
         self.vehicle: VehicleModel = vehicle
         self.dt: float = DT
         self.control_horizon: int = int(T / DT)
 
-        # TODO: clean up
         self.Q: npt.NDArray[np.float64] = np.diag(state_cost)
         self.Qf: npt.NDArray[np.float64] = np.diag(final_state_cost)
         self.R: npt.NDArray[np.float64] = np.diag(input_cost)
@@ -148,7 +147,7 @@ class MPC:
                 + self.C_params[k]
             ]
 
-            # XY tracking does NOT nake much sense in autonomous driving...
+            # XY tracking does NOT make much sense in autonomous driving...
             # Instead we care how much off to the side we are w.r.t the track
             #
             # The standard cross-track and along-track errors are calculated by projecting position errors onto the track point
@@ -271,7 +270,7 @@ class MPC:
         self.v_ref_param.value = v_ref
         self.theta_ref_param.value = theta_ref
 
-        # To compute the system matices for the LTV system, we may initially think to linearize the vehicle's nonlinear kinematics (like sin/cos/tan
+        # To compute the system matrices for the LTV system, we may initially think to linearize the vehicle's nonlinear kinematics (like sin/cos/tan
         # steering math) **once** around the current state.
         # A, B, C = self.compute_linear_model_matrices(initial_state, prev_cmd)
         # It creates a flat tangent

@@ -124,6 +124,18 @@ def get_ref_trajectory(state, path, target_v, T, DT, ego_frame=True):
     return xref
 
 
+def ego_to_global(
+    state: np.ndarray[np.float64], x_mpc: np.ndarray[np.float64]
+) -> np.ndarray[np.float64]:
+    traj = x_mpc[:2, :].copy()
+    ct, st = np.cos(state[3]), np.sin(state[3])
+    R = np.array([[ct, -st], [st, ct]])
+    traj = R @ traj
+    traj[0, :] += state[0]
+    traj[1, :] += state[1]
+    return traj
+
+
 def compute_errors(current_state, path):
     # 1. Find the closest waypoint index
     dx = current_state[0] - path[0, :]
