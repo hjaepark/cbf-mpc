@@ -276,12 +276,12 @@ def main() -> None:
         cte_rmse = -1
         heading_rmse = -1
 
-        input("\033[92mPress Enter to continue...\033[0m")
-
-        mpc_thread.start()
         sim_start_time = time.perf_counter()
 
         try:
+            input("\033[92mPress Enter to continue...\033[0m")
+            mpc_thread.start()
+
             while viewer.is_running():
 
                 # Check for completion
@@ -378,12 +378,9 @@ def main() -> None:
             print("\nInterrupted by user (CTRL-C). Shutting down...")
 
         finally:
-            # Signal the background thread to exit and wait for it
             with shared.lock:
                 shared.is_active = False
-
-            if mpc_thread.is_alive():
-                mpc_thread.join(timeout=1.0)
+            viewer.clear_texts()
 
 
 if __name__ == "__main__":
