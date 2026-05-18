@@ -322,7 +322,16 @@ class MPC:
             )
 
             if self.x.value is None:
-                return x_guess, u_guess
+                # the oprimiser failed!
+                # In this case you want to initialise a recovery behaviour!
+                # to make this simple here I just decelerate
+                print("MPC failed -> Emergency braking!")
+                emergency_u = np.zeros((self.nu, self.control_horizon))
+                emergency_u[0, :] = -self.vehicle.max_acc  # Maximum deceleration
+                emergency_u[1, :] = 0.0  # Straighten wheels
+
+                self.prev_cmd = np.copy(emergency_u)
+                return None, self.prev_cmd
 
             new_x = np.array(self.x.value)
             new_u = np.array(self.u.value)

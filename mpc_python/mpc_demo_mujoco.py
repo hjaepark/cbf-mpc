@@ -329,15 +329,17 @@ def main() -> None:
                 control[0] = mpc_steer
                 control[1] = current_state[2] + mpc_accel * DT
 
-                # Visuals
+                # Update camera position to follow the car
                 viewer.cam.lookat[:] = [current_state[0], current_state[1], 0.0]
-                viewer.user_scn.ngeom = 0
 
+                # re-draw markers
+                viewer.user_scn.ngeom = 0
                 draw_path(viewer, path)
                 draw_trail(viewer, x_hist, y_hist)
                 if x_mpc_world is not None:
                     draw_mpc_preview(viewer, x_mpc_world)
 
+                # Update the HUD
                 actual_steer = np.degrees(d.qpos[steer_qaddr])
                 goal_dist = np.hypot(
                     current_state[0] - path[0, -1], current_state[1] - path[1, -1]
@@ -360,7 +362,7 @@ def main() -> None:
                 )
                 viewer.sync()
 
-                # Frame limiting
+                # Frame limiting (sleep just enough to hit 60 FPS)
                 time_until_next_frame = render_dt - (
                     time.perf_counter() - elapsed_real_time - sim_start_time
                 )
