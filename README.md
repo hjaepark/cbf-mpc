@@ -1,14 +1,17 @@
 # mpc_python
 
-An (hopefully) easy-to-follow, lightweight* (Iterative) MPC tracking controller built with CVXPY and paired with MuJoCo designed to help anyone looking to transition from basic control to real-time convex optimization.
+An (hopefully) easy-to-follow  (Iterative) MPC tracking controller built with CVXPY and paired with MuJoCo designed to help anyone looking to transition from basic control to real-time convex optimization.
+
+<figure>
+  <img src="img/banner.png" width="500" />
+  <figcaption>MuJoCo simulation with the mushr car model</figcaption>
+</figure>
 
 Also I keep here my (old) notebooks on Model Predictive Control for path-following problems.
 
 This mainly uses **[CVXPY](https://www.cvxpy.org/)** to maintain a strict linear programming framework rather than relying on a non-linear solver like CasADi (which I love btw). But, implementing an iMPC can still bridge the gap between convex optimization and real-world vehicle physics, allowing you to handle non-linear kinematics through iterative linearization.
 
 This repo contains code and ideas from other projects, check them out in the special thanks section.
-
-(* ~12ms per iMPC iteration on my 8th gen Intel CPU)
 
 ## Getting started
 
@@ -49,8 +52,6 @@ python3 mpc_demo_nosim.py
 
 This environment also includes `jupyter lab` to experiment with the notebooks.
 
-## Results
-
 <figure>
   <img src="img/demo-mujoco.gif" width="500" />
   <figcaption>MuJoCo simulation with the mushr car model</figcaption>
@@ -58,7 +59,7 @@ This environment also includes `jupyter lab` to experiment with the notebooks.
 
 <figure>
   <img src="img/demo.gif" width="500" />
-  <figcaption>Headless toy demo with scipy.odeint plant</figcaption>
+  <figcaption>Headless toy demo with dummy car</figcaption>
 </figure>
 
 ## Notebooks

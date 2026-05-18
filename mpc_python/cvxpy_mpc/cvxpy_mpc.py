@@ -328,7 +328,7 @@ class MPC:
             if self.x.value is None:
                 # the oprimiser failed!
                 # In this case you want to initialise a recovery behaviour!
-                # to make this simple here I just decelerate
+                # To make this simple here I just decelerate
                 print("MPC failed -> Emergency braking!")
                 emergency_u = np.zeros((self.nu, self.control_horizon))
                 v = initial_state[2]
