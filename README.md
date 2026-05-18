@@ -1,33 +1,55 @@
 # mpc_python
 
-I keep here my (old) notebooks on Model Predictive Control for path-following problems. Includes a Pybullet simulation to demo the controller.
+A (hopefully) easy-to-follow  Iterative MPC tracking controller built with CVXPY and paired with MuJoCo. Designed to help anyone looking to transition from basic control to real-time convex optimization.
 
-This mainly uses **[CVXPY](https://www.cvxpy.org/)** as a framework.
+<figure>
+  <img src="img/banner.png" width="500" />
+  <figcaption>MuJoCo simulation with the mushr car model</figcaption>
+</figure>
 
-This repo contains code from other projecs, check them out in the special thanks section.
+This mainly uses **[CVXPY](https://www.cvxpy.org/)** to maintain a strict quadratic programming framework rather than relying on a non-linear solver like CasADi (which I love btw!). But, implementing an iMPC, we can still bridge the gap between convex optimization and real-world vehicle physics, allowing you to handle non-linear kinematics through iterative linearization.
 
+<figure>
+  <img src="img/demo-mujoco.gif" width="500" />
+  <figcaption>MuJoCo simulation with the mushr car model</figcaption>
+</figure>
+
+<figure>
+  <img src="img/demo.gif" width="500" />
+  <figcaption>Headless toy demo with dummy car</figcaption>
+</figure>
+
+Note: I've also preserved my original notebooks on Model Predictive Control for path-following problems here for historical context, a bit outdated.
+
+This repo builds upon code and ideas from other open-source projects; please check them out in the Special Thanks section!
 
 ## Getting started
 
 ### Nix Flake ❄️
 
-A [Nix flake](flake.nix) is provided for a reproducible development shell:
+A [Nix flake](flake.nix) is provided for a reproducible development shell.
 
+Just run the 2 examples below:
 ```bash
-nix develop --impure        # default with extra dev tools
-nix develop .#demo --impure # minimal shell just to run the demo
+nix run --impure .#mujoco-demo
+nix run .#nosim-demo
+```
+
+Otherwise, enter the development shell: this is heavier but also includes `jupyter lab` to experiment with the notebooks.
+```bash
+nix develop --impure
 ```
 
 GUI demos require `nixGL` (auto-detects Intel/AMD/NVIDIA GPU):
 
 ```bash
-nixGL python mpc_pybullet_demo/mpc_demo_pybullet.py
+nixGL python mpc_python/mpc_demo_mujoco.py
 ```
 
 Headless demos run without it:
 
 ```bash
-python mpc_pybullet_demo/mpc_demo_nosim.py
+python mpc_python/mpc_demo_nosim.py
 ```
 
 ### Conda
@@ -37,30 +59,16 @@ conda env create -f env.yml
 conda activate simulation
 ```
 
-Then run:
+Then run the scripts:
 
 ```bash
-python3 mpc_demo_pybullet.py
+python3 mpc_demo_mujoco.py
 python3 mpc_demo_nosim.py
 ```
 
-This environment also includes `jupyter lab` to experiment with the notebooks.
-
-## Results
-
-Racing car model is from: *https://github.com/erwincoumans/pybullet_robots*.
-
-![](img/f10.png)
-
-![](img/demo_bullet.gif)
-
-![](img/demo.gif)
-
-The settings used for tuning the MPC controller are in the **[mpc_config](./mpc_pybullet_demo/mpcpy/mpc_config.py)** class.
-
 ## Notebooks
 
-1. **Model derivation** — analytical and numerical derivation ([1.0](notebooks/1.0-lti-system-modelling.ipynb), [parametrized curves](notebooks/1.1-parametrized-path-curves.ipynb), [differential](notebooks/models/differential_model.ipynb), [motion model](notebooks/models/motion_model.ipynb))
+1. **Model derivation** — analytical and numerical derivation ([1.0](notebooks/1.0-linearised-system-modelling.ipynb), [parametrized curves](notebooks/1.1-parametrized-path-curves.ipynb), [differential](notebooks/models/differential_model.ipynb), [motion model](notebooks/models/motion_model.ipynb))
 
 2. **MPC** — implementation and testing of various tweaks ([2.0](notebooks/2.0-MPC-base.ipynb), [2.1](notebooks/2.1-MPC-with-iterative-linearization.ipynb), [2.2](notebooks/2.2-MPC-v2-car-reference-frame.ipynb), [2.3](notebooks/2.3-MPC-simplified.ipynb))
 
@@ -69,6 +77,6 @@ The settings used for tuning the MPC controller are in the **[mpc_config](./mpc_
 ## References & Special Thanks :star: :
 * [Prof. Borrelli - mpc papers and material](https://borrelli.me.berkeley.edu/pdfpub/IV_KinematicMPC_jason.pdf)
 * [AtsushiSakai - pythonrobotics](https://github.com/AtsushiSakai/PythonRobotics/)
-* [erwincoumans - pybullet](https://pybullet.org/wordpress/)
 * [alexliniger - mpcc](https://github.com/alexliniger/MPCC) and his [paper](https://onlinelibrary.wiley.com/doi/abs/10.1002/oca.2123)
 * [arex18 - rocket-lander](https://github.com/arex18/rocket-lander)
+* [prl-mushr - mushr](https://github.com/prl-mushr/mushr_mujoco_ros) for the vehicle used
