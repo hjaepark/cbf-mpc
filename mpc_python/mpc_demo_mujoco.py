@@ -90,12 +90,7 @@ def controller_loop(
         # so we the optimization problem is a bit easier and we save some solver time
         # Get reference trajectory
         target = get_ref_trajectory(pred_state, path, TARGET_VEL, T, DT)
-
-        # Integrate physics forward in ego space
-        pred_ego_state = [0.0, 0.0, v, 0.0]
-        pred_ego_state[0] += v * elapsed
-        pred_ego_state[2] += a * elapsed
-        pred_ego_state[3] += (v * np.tan(delta) / L) * elapsed
+        pred_ego_state = [0.0, 0.0, pred_state[2], 0.0]
         x_mpc, u_mpc = mpc.solve(pred_ego_state, target, verbose=False)
 
         # Extract the immediate next optimal control actions
@@ -107,7 +102,9 @@ def controller_loop(
             shared.mpc_accel = control[0]
             shared.mpc_steer = control[1]
             shared.mpc_elapsed = elapsed
-            shared.x_mpc_world = ego_to_global(pred_state, x_mpc)
+            shared.x_mpc_world = (
+                ego_to_global(pred_state, x_mpc) if x_mpc is not None else None
+            )
 
         # Enforce loop frequency
         elapsed_total = time.time() - start_time

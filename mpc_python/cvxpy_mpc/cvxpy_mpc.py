@@ -186,9 +186,6 @@ class MPC:
             else:
                 cost += opt.quad_form(self.u[:, k] - self.u[:, k - 1], self.Rr)
 
-            constr += [opt.abs(self.u[0, k]) <= self.vehicle.max_acc]
-            constr += [opt.abs(self.u[1, k]) <= self.vehicle.max_steer]
-
         # Final point tracking cost
         e_along_f = (
             self.cos_param[-1] * self.x[0, -1]
@@ -213,6 +210,13 @@ class MPC:
 
         # Initial state
         constr += [self.x[:, 0] == self.initial_state_param]
+
+        # state magnitude
+        constr += [opt.abs(self.x[2, :]) <= self.vehicle.max_speed]
+
+        # control magnitude
+        constr += [opt.abs(self.u[0, :]) <= self.vehicle.max_acc]
+        constr += [opt.abs(self.u[1, :]) <= self.vehicle.max_steer]
 
         # Actuation rate of change bounds (step 0 uses last cmd)
         constr += [
@@ -327,9 +331,11 @@ class MPC:
                 # to make this simple here I just decelerate
                 print("MPC failed -> Emergency braking!")
                 emergency_u = np.zeros((self.nu, self.control_horizon))
-                emergency_u[0, :] = -self.vehicle.max_acc  # Maximum deceleration
-                emergency_u[1, :] = 0.0  # Straighten wheels
-
+                v = initial_state[2]
+                for k in range(self.control_horizon):
+                    a = -self.vehicle.max_acc if v > 0 else 0.0
+                    emergency_u[0, k] = a
+                    v = max(0.0, v + a * self.dt)
                 self.prev_cmd = np.copy(emergency_u)
                 return None, self.prev_cmd
 
