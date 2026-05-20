@@ -15,7 +15,10 @@ class VehicleModel:
     """
 
     def __init__(self):
-        self.wheelbase = 0.2965  # front axle (0.1385) - rear axle (-0.158), from buddy.xml
+        self.wheelbase = (
+            0.2965  # front axle (0.1385) - rear axle (-0.158), from buddy.xml
+        )
+        self.width = 0.16
         self.max_speed = 1.5
         self.max_acc = 1.0
         self.max_d_acc = 1.0

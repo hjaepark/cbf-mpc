@@ -25,6 +25,11 @@ TARGET_VEL = 1.0  # m/s
 T = 5  # Prediction Horizon [s]
 DT = 0.2  # discretization step [s]
 
+# Obstacle (global frame)
+OBS_X = 4.0
+OBS_Y = 2.2
+OBS_R = 0.5
+
 
 # Classes
 class MPCSim:
@@ -86,6 +91,16 @@ class MPCSim:
         self.ax_main.set_ylim(
             self.path[1, :].min() - y_pad, self.path[1, :].max() + y_pad
         )
+
+        # Obstacle visualization
+        self.obs_circle = plt.Circle(
+            (OBS_X, OBS_Y),
+            OBS_R,
+            color="red",
+            alpha=0.4,
+            label="obstacle",
+        )
+        self.ax_main.add_patch(self.obs_circle)
 
         (self.traj_line,) = self.ax_main.plot(
             [],
@@ -172,8 +187,24 @@ class MPCSim:
 
                 # dynamycs w.r.t robot frame
                 curr_state = np.array([0, 0, self.state[2], 0])
+
+                # Transform obstacle from global to ego frame
+                dx = OBS_X - self.state[0]
+                dy = OBS_Y - self.state[1]
+                ct = np.cos(-self.state[3])
+                st = np.sin(-self.state[3])
+                obs_ego_x = dx * ct - dy * st
+                obs_ego_y = dy * ct + dx * st
+
                 t0 = time.perf_counter()
-                x_mpc, u_mpc = self.mpc.solve(curr_state, target, verbose=False)
+                x_mpc, u_mpc = self.mpc.solve(
+                    curr_state,
+                    target,
+                    verbose=False,
+                    obstacle_x=obs_ego_x,
+                    obstacle_y=obs_ego_y,
+                    obstacle_radius=OBS_R,
+                )
                 self.mpc_solve_time = time.perf_counter() - t0
                 # only the first one is used to advance the simulation
 

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import pathlib
-import select
-import sys
 import threading
 import time
 
@@ -22,6 +20,11 @@ from cvxpy_mpc.utils import (
 TARGET_VEL = 1.0
 T = 4.0
 DT = 0.2  # controller time step
+
+# Obstacle (global frame)
+OBS_X = 7.0
+OBS_Y = 3.8
+OBS_R = 0.5
 
 
 # MPC and sim are on 2 threads
@@ -91,7 +94,23 @@ def controller_loop(
         # Get reference trajectory
         target = get_ref_trajectory(pred_state, path, TARGET_VEL, T, DT)
         pred_ego_state = [0.0, 0.0, pred_state[2], 0.0]
-        x_mpc, u_mpc = mpc.solve(pred_ego_state, target, verbose=False)
+
+        # Transform obstacle from global to ego frame
+        dx = OBS_X - pred_state[0]
+        dy = OBS_Y - pred_state[1]
+        ct = np.cos(-pred_state[3])
+        st = np.sin(-pred_state[3])
+        obs_ego_x = dx * ct - dy * st
+        obs_ego_y = dy * ct + dx * st
+
+        x_mpc, u_mpc = mpc.solve(
+            pred_ego_state,
+            target,
+            verbose=False,
+            obstacle_x=obs_ego_x,
+            obstacle_y=obs_ego_y,
+            obstacle_radius=OBS_R,
+        )
 
         # Extract the immediate next optimal control actions
         control = (u_mpc[0, 0], u_mpc[1, 0])
@@ -182,6 +201,21 @@ def draw_trail(
         )
         mujoco.mjv_connector(g, mujoco.mjtGeom.mjGEOM_CAPSULE, 0.02, p1, p2)
         viewer.user_scn.ngeom += 1
+
+
+def draw_obstacle(viewer: mujoco.viewer.MjViewer) -> None:
+    if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
+        return
+    g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
+    mujoco.mjv_initGeom(
+        g,
+        type=mujoco.mjtGeom.mjGEOM_SPHERE,
+        size=np.array([OBS_R, 0.0, 0.0], dtype=np.float64),
+        pos=np.array([OBS_X, OBS_Y, 0.0], dtype=np.float64),
+        mat=np.eye(3).ravel(),
+        rgba=np.array([1, 0, 0, 0.4], dtype=np.float32),
+    )
+    viewer.user_scn.ngeom += 1
 
 
 def draw_mpc_preview(
@@ -332,6 +366,7 @@ def main() -> None:
                 # re-draw markers
                 viewer.user_scn.ngeom = 0
                 draw_path(viewer, path)
+                draw_obstacle(viewer)
                 draw_trail(viewer, x_hist, y_hist)
                 if x_mpc_world is not None:
                     draw_mpc_preview(viewer, x_mpc_world)
