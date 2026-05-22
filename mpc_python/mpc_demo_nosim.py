@@ -10,7 +10,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
 from cvxpy_mpc import MPC, VehicleModel
-from cvxpy_mpc.utils import compute_path_from_wp, ego_to_global, get_ref_trajectory
+from cvxpy_mpc.utils import (
+    compute_path_from_wp,
+    detect_obstacle,
+    ego_to_global,
+    get_ref_trajectory,
+)
 from scipy.integrate import odeint
 
 # Robot Starting position
@@ -188,22 +193,16 @@ class MPCSim:
                 # dynamycs w.r.t robot frame
                 curr_state = np.array([0, 0, self.state[2], 0])
 
-                # Transform obstacle from global to ego frame
-                dx = OBS_X - self.state[0]
-                dy = OBS_Y - self.state[1]
-                ct = np.cos(-self.state[3])
-                st = np.sin(-self.state[3])
-                obs_ego_x = dx * ct - dy * st
-                obs_ego_y = dy * ct + dx * st
-
                 t0 = time.perf_counter()
                 x_mpc, u_mpc = self.mpc.solve(
                     curr_state,
                     target,
                     verbose=False,
-                    obstacle_x=obs_ego_x,
-                    obstacle_y=obs_ego_y,
-                    obstacle_radius=OBS_R,
+                    obstacle=detect_obstacle(
+                        OBS_X, OBS_Y, OBS_R,
+                        self.state[0], self.state[1], self.state[3],
+                        self.state[2], T,
+                    ),
                 )
                 self.mpc_solve_time = time.perf_counter() - t0
                 # only the first one is used to advance the simulation

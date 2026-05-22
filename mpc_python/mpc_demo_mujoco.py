@@ -13,6 +13,7 @@ from cvxpy_mpc import MPC, VehicleModel
 from cvxpy_mpc.utils import (
     compute_path_from_wp,
     compute_errors,
+    detect_obstacle,
     ego_to_global,
     get_ref_trajectory,
 )
@@ -24,7 +25,7 @@ DT = 0.2  # controller time step
 # Obstacle (global frame)
 OBS_X = 7.0
 OBS_Y = 3.8
-OBS_R = 0.5
+OBS_R = 0.375
 
 
 # MPC and sim are on 2 threads
@@ -95,21 +96,15 @@ def controller_loop(
         target = get_ref_trajectory(pred_state, path, TARGET_VEL, T, DT)
         pred_ego_state = [0.0, 0.0, pred_state[2], 0.0]
 
-        # Transform obstacle from global to ego frame
-        dx = OBS_X - pred_state[0]
-        dy = OBS_Y - pred_state[1]
-        ct = np.cos(-pred_state[3])
-        st = np.sin(-pred_state[3])
-        obs_ego_x = dx * ct - dy * st
-        obs_ego_y = dy * ct + dx * st
-
         x_mpc, u_mpc = mpc.solve(
             pred_ego_state,
             target,
             verbose=False,
-            obstacle_x=obs_ego_x,
-            obstacle_y=obs_ego_y,
-            obstacle_radius=OBS_R,
+            obstacle=detect_obstacle(
+                OBS_X, OBS_Y, OBS_R,
+                pred_state[0], pred_state[1], pred_state[3],
+                v, T,
+            ),
         )
 
         # Extract the immediate next optimal control actions

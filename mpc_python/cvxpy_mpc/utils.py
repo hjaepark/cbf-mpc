@@ -189,3 +189,32 @@ def compute_errors(
     heading_err = (current_state[3] - target_heading + np.pi) % (2.0 * np.pi) - np.pi
 
     return (cte, heading_err)
+
+
+def detect_obstacle(
+    obs_global_x: float,
+    obs_global_y: float,
+    obs_radius: float,
+    robot_x: float,
+    robot_y: float,
+    robot_heading: float,
+    robot_speed: float,
+    horizon: float,
+    margin: float = 2.0,
+) -> tuple[float, float, float] | None:
+    """Transform obstacle to ego frame and gate by detection range.
+
+    Returns (ego_x, ego_y, radius) if obstacle is ahead and within
+    robot_speed * horizon + margin meters, otherwise None.
+    """
+    dx = obs_global_x - robot_x
+    dy = obs_global_y - robot_y
+    ct = np.cos(-robot_heading)
+    st = np.sin(-robot_heading)
+    ego_x = dx * ct - dy * st
+    ego_y = dy * ct + dx * st
+
+    detect_range = robot_speed * horizon + margin
+    if 0 < ego_x < detect_range:
+        return (ego_x, ego_y, obs_radius)
+    return None

@@ -192,9 +192,23 @@ class MPC:
             )
             cost += opt.quad_form(e, self.Q)
 
-            # Obstacle half-plane constraint: n^T * p >= safe_dist
-            # Hard Constraint:  DotProduct(Normal, Position) >= Safe_Distance
-            # Soft Constraint:  DotProduct(Normal, Position) >= Safe_Distance - Slack
+            # Obstacle half-plane constraint:
+            # obstacle avoidance: (px - pobs)*2 > R  in non-convex :(
+            # this is linearised as : dot(px - pbos, n) > R
+            # where n is a normal pointing from obstacle center toward the reference trajectory.
+            # so the optimiser knows to stay on the same side of the obstacle as the reference
+            #
+            #      Valid Region
+            #            ^
+            #            | n = (nx, ny)
+            #            * p_ref
+            #            |
+            #    --------+---------- Half-Plane
+            #            | R
+            #            * p_obs
+            #
+            # Hard Constraint:  dot(n, p) >= Safe_Distance
+            # Soft Constraint:  dot(n, p) >= Safe_Distance - Slack
             constr += [
                 self.obs_n_x[k] * self.x[0, k + 1] + self.obs_n_y[k] * self.x[1, k + 1]
                 >= self.obs_safe_dist[k] - self.slack_obs[k]
@@ -271,12 +285,12 @@ class MPC:
         verbose: bool = False,
         max_iter: int = 3,
         tolerance: float = 1e-2,
-        obstacle_x: float | None = None,
-        obstacle_y: float | None = None,
-        obstacle_radius: float = 0.3,
+        obstacle: tuple[float, float, float] | None = None,
     ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
         assert len(initial_state) == self.nx
         assert target.shape == (self.nx, self.control_horizon + 1)
+
+        obs_x, obs_y, obs_r = obstacle if obstacle is not None else (None, None, None)
 
         self.initial_state_param.value = np.array(initial_state)
         self.last_cmd_param.value = (
@@ -349,27 +363,25 @@ class MPC:
             obs_ny_vals = np.zeros(self.control_horizon)
             obs_dist_vals = np.zeros(self.control_horizon)
             for k in range(self.control_horizon):
-                if obstacle_x is None:
+                if obstacle is None:
+                    # turn this in something trivial for the optimiser
                     obs_nx_vals[k] = 1.0
                     obs_ny_vals[k] = 0.0
                     obs_dist_vals[k] = -1000.0
                 else:
-                    # x_k = x_guess[0, k + 1]
-                    # y_k = x_guess[1, k + 1]
                     # We need a stable point to calculate the normal vector.
-                    x_k = x_ref[k + 1]
-                    y_k = y_ref[k + 1]
-                    dx = x_k - obstacle_x
-                    dy = y_k - obstacle_y
+                    dx = x_ref[k + 1] - obs_x
+                    dy = y_ref[k + 1] - obs_y
                     dist = np.hypot(dx, dy)
                     dist = dist if dist > 1e-5 else 1e-5
-
+                    # [x,y] components of vector n
                     nx = dx / dist
                     ny = dy / dist
+
                     obs_nx_vals[k] = nx
                     obs_ny_vals[k] = ny
                     obs_dist_vals[k] = (
-                        nx * obstacle_x + ny * obstacle_y + obstacle_radius
+                        nx * obs_x + ny * obs_y + obs_r
                     )
 
             self.obs_n_x.value = obs_nx_vals
