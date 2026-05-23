@@ -23,10 +23,12 @@ TARGET_VEL = 1.0
 T = 4.0
 DT = 0.2  # controller time step
 
-# Obstacle (global frame)
-OBS_X = 7.0
-OBS_Y = 3.8
-OBS_R = 0.375
+# Obstacles (global frame) — list of (x, y, radius)
+OBS = [
+    (7.0, 3.8, 0.375),
+    (11.5, 2.5, 0.35),
+    (7.0, -5.5, 0.65),
+]
 
 
 # MPC and sim are on 2 threads
@@ -93,9 +95,7 @@ def controller_loop(
 
         # Pretends to be the obstacle avoidance system
         pred_obstacle = detect_obstacle(
-            OBS_X,
-            OBS_Y,
-            OBS_R,
+            OBS,
             pred_state[0],
             pred_state[1],
             pred_state[3],
@@ -205,18 +205,19 @@ def draw_trail(
 
 
 def draw_obstacle(viewer: mujoco.viewer.MjViewer) -> None:
-    if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
-        return
-    g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
-    mujoco.mjv_initGeom(
-        g,
-        type=mujoco.mjtGeom.mjGEOM_SPHERE,
-        size=np.array([OBS_R, 0.0, 0.0], dtype=np.float64),
-        pos=np.array([OBS_X, OBS_Y, 0.0], dtype=np.float64),
-        mat=np.eye(3).ravel(),
-        rgba=np.array([1, 0, 0, 0.4], dtype=np.float32),
-    )
-    viewer.user_scn.ngeom += 1
+    for ox, oy, rad in OBS:
+        if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
+            return
+        g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
+        mujoco.mjv_initGeom(
+            g,
+            type=mujoco.mjtGeom.mjGEOM_SPHERE,
+            size=np.array([rad, 0.0, 0.0], dtype=np.float64),
+            pos=np.array([ox, oy, 0.0], dtype=np.float64),
+            mat=np.eye(3).ravel(),
+            rgba=np.array([1, 0, 0, 0.4], dtype=np.float32),
+        )
+        viewer.user_scn.ngeom += 1
 
 
 def draw_mpc_preview(

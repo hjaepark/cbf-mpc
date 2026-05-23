@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import signal
 import time
 
 import sys
@@ -30,10 +31,12 @@ TARGET_VEL = 1.0  # m/s
 T = 5  # Prediction Horizon [s]
 DT = 0.2  # discretization step [s]
 
-# Obstacle (global frame)
-OBS_X = 4.0
-OBS_Y = 2.2
-OBS_R = 0.5
+# Obstacles (global frame) — list of (x, y, radius)
+OBS = [
+    (4.0, 2.2, 0.5),
+    (12.5, 0.5, 0.35),
+    (7.0, -5.5, 0.45),
+]
 
 
 # Classes
@@ -98,14 +101,14 @@ class MPCSim:
         )
 
         # Obstacle visualization
-        self.obs_circle = plt.Circle(
-            (OBS_X, OBS_Y),
-            OBS_R,
-            color="red",
-            alpha=0.4,
-            label="obstacle",
-        )
-        self.ax_main.add_patch(self.obs_circle)
+        self.obs_circles: list[plt.Circle] = []
+        for ox, oy, rad in OBS:
+            c = plt.Circle(
+                (ox, oy), rad,
+                color="red", alpha=0.4, label="obstacle",
+            )
+            self.ax_main.add_patch(c)
+            self.obs_circles.append(c)
 
         (self.traj_line,) = self.ax_main.plot(
             [],
@@ -174,7 +177,6 @@ class MPCSim:
 
     def run(self) -> None:
         self.plot_sim()
-        input("Press Enter to continue...")
         try:
             while 1:
                 if (
@@ -184,8 +186,9 @@ class MPCSim:
                     )
                     < 0.5
                 ):
-                    print("Success! Goal Reached")
-                    input("Press Enter to continue...")
+                    print("Success! Goal Reached\nClose the plot window or press CTRL-C to exit.")
+                    while plt.fignum_exists(self.fig.number):
+                        plt.pause(0.1)
                     return
                 # Get Reference_traj -> inputs are in worldframe
                 target = get_ref_trajectory(self.state, self.path, TARGET_VEL, T, DT)
@@ -199,7 +202,7 @@ class MPCSim:
                     target,
                     verbose=False,
                     obstacle=detect_obstacle(
-                        OBS_X, OBS_Y, OBS_R,
+                        OBS,
                         self.state[0], self.state[1], self.state[3],
                         self.state[2], T,
                     ),
@@ -226,7 +229,7 @@ class MPCSim:
                 self.d_history.append(self.control[1])
                 self.plot_sim()
         except KeyboardInterrupt:
-            pass
+            print("\nInterrupted by user (CTRL-C). Exiting...")
 
     def predict_next_state(
         self,
@@ -333,6 +336,7 @@ def plot_car(ax: plt.Axes, x: float, y: float, yaw: float) -> plt.Line2D:
 
 
 def do_sim() -> None:
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     sim = MPCSim()
     try:
         sim.run()
