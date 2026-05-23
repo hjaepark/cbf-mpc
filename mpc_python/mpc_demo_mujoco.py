@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pathlib
+import signal
 import threading
 import time
 
@@ -90,6 +91,18 @@ def controller_loop(
         pred_state[2] += a * elapsed
         pred_state[3] += (v * np.tan(delta) / L) * elapsed
 
+        # Pretends to be the obstacle avoidance system
+        pred_obstacle = detect_obstacle(
+            OBS_X,
+            OBS_Y,
+            OBS_R,
+            pred_state[0],
+            pred_state[1],
+            pred_state[3],
+            pred_state[2],
+            T,
+        )
+
         # NOTE: we convert the state in ego frame and we use a ego target
         # so we the optimization problem is a bit easier and we save some solver time
         # Get reference trajectory
@@ -97,14 +110,7 @@ def controller_loop(
         pred_ego_state = [0.0, 0.0, pred_state[2], 0.0]
 
         x_mpc, u_mpc = mpc.solve(
-            pred_ego_state,
-            target,
-            verbose=False,
-            obstacle=detect_obstacle(
-                OBS_X, OBS_Y, OBS_R,
-                pred_state[0], pred_state[1], pred_state[3],
-                v, T,
-            ),
+            pred_ego_state, target, verbose=False, obstacle=pred_obstacle
         )
 
         # Extract the immediate next optimal control actions
@@ -252,22 +258,22 @@ def main() -> None:
         0.05,
     )
 
-    state_cost = [
+    state_cost = final_state_cost = [
         1.0,
-        80.0,
+        50.0,
         10.0,
         20.0,
     ]  # [Along-track, Cross-track, Velocity, Heading]
-    actuation_cost = [10.0, 10.0]
+    actuation_cost = actuation_rate_cost = [10.0, 10.0]  # [Acceleration, Steer]
 
     mpc = MPC(
         VehicleModel(),
         T,
         DT,
         state_cost,
-        state_cost,
+        final_state_cost,
         actuation_cost,
-        actuation_cost,
+        actuation_rate_cost,
     )
 
     steer_jnt = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, "buddy_steering_wheel")
@@ -277,6 +283,8 @@ def main() -> None:
     mpc_thread = threading.Thread(
         target=controller_loop, args=(mpc, path, shared), daemon=True
     )
+
+    signal.signal(signal.SIGINT, signal.default_int_handler)
 
     with mujoco.viewer.launch_passive(m, d) as viewer:
         viewer.cam.lookat[:] = [0.0, 0.0, 0.0]
@@ -296,10 +304,9 @@ def main() -> None:
         heading_rmse = -1
 
         sim_start_time = time.perf_counter()
+        mpc_thread.start()
 
         try:
-            input("\033[92mPress Enter to continue...\033[0m")
-            mpc_thread.start()
 
             while viewer.is_running():
 
