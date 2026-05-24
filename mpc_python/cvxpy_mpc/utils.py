@@ -202,9 +202,8 @@ def detect_obstacle(
 ) -> tuple[float, float, float] | None:
     """Return the closest in-front obstacle within detection range, or None.
 
-    Iterates the obstacle list, transforms each to ego frame, filters by
-    0 < ego_x < robot_speed * horizon + margin, and returns the (ego_x, ego_y, r)
-    of the one with smallest Euclidean distance.
+    Returns the global (x, y, r) of the obstacle with smallest Euclidean
+    distance to the robot that satisfies 0 < ego_x < robot_speed * horizon + margin.
     """
     detect_range = robot_speed * horizon + margin
     closest = None
@@ -216,9 +215,8 @@ def detect_obstacle(
         st = np.sin(-robot_heading)
         ego_x = dx * ct - dy * st
         ego_y = dy * ct + dx * st
-        if 0 < ego_x < detect_range:
-            d = np.hypot(ego_x, ego_y)
-            if d < closest_dist:
-                closest_dist = d
-                closest = (ego_x, ego_y, obs_r)
+        d = np.hypot(ego_x, ego_y)
+        if 0 < ego_x < detect_range and d < closest_dist:
+            closest_dist = d
+            closest = (obs_x, obs_y, obs_r)
     return closest

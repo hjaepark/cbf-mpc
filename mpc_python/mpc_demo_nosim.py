@@ -191,7 +191,7 @@ class MPCSim:
                     while plt.fignum_exists(self.fig.number):
                         plt.pause(0.1)
                     return
-                # External obstacle detection pipeline (global→ego frame)
+                # External obstacle detection pipeline
                 self.detected_obs = detect_obstacle(
                     OBS,
                     self.state[0], self.state[1], self.state[3],
@@ -203,12 +203,22 @@ class MPCSim:
                 # dynamycs w.r.t robot frame
                 curr_state = np.array([0, 0, self.state[2], 0])
 
+                # Transform global obstacle to ego frame
+                if self.detected_obs is not None:
+                    gx, gy, r = self.detected_obs
+                    dx = gx - self.state[0]
+                    dy = gy - self.state[1]
+                    ct, st = np.cos(-self.state[3]), np.sin(-self.state[3])
+                    obs_ego = (dx * ct - dy * st, dy * ct + dx * st, r)
+                else:
+                    obs_ego = None
+
                 t0 = time.perf_counter()
                 x_mpc, u_mpc = self.mpc.solve(
                     curr_state,
                     target,
                     verbose=False,
-                    obstacle=self.detected_obs,
+                    obstacle=obs_ego,
                 )
                 self.mpc_solve_time = time.perf_counter() - t0
                 # only the first one is used to advance the simulation

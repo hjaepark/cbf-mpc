@@ -23,13 +23,6 @@ TARGET_VEL = 1.0
 T = 4.0
 DT = 0.2  # controller time step
 
-# Obstacles (global frame) — list of (x, y, radius)
-OBS = [
-    (7.0, 3.8, 0.375),
-    (11.5, 2.5, 0.35),
-    (7.0, -5.5, 0.65),
-]
-
 
 # MPC and sim are on 2 threads
 # avoids messy global vars
@@ -45,6 +38,7 @@ class SharedData:
         self.is_active: bool = True
         self.mpc_accel: float = 0.0
         self.mpc_steer: float = 0.0
+        self.mpc_base_vel: float = 0.0
 
         # Telemetry & visualization
         self.x_mpc_world: npt.NDArray[np.float64] | None = None
@@ -66,7 +60,9 @@ def controller_loop(
             if not shared.is_active or shared.goal_reached:
                 break
             current_state = shared.state.copy()  # Global [X, Y, V, Theta]
-            pred_obstacle = shared.obstacle  # from external detection pipeline
+            global_obs = (
+                shared.obstacle
+            )  # from external detection pipeline (global frame)
         last_control = (shared.mpc_accel, shared.mpc_steer)
         elapsed = shared.mpc_elapsed
 
@@ -103,13 +99,16 @@ def controller_loop(
         target = get_ref_trajectory(pred_state, path, TARGET_VEL, T, DT)
         pred_ego_state = [0.0, 0.0, pred_state[2], 0.0]
 
-        # latency correction: obstacle was detected at current_state time (t),
-        # but mpc plans at pred_state time (t + elapsed).
-        # the vehicle moved forward by v*elapsed → shift obstacle backward in ego frame.
-        if pred_obstacle is not None:
-            ego_x, ego_y, r = pred_obstacle
-            ego_x -= current_state[2] * elapsed
-            pred_obstacle = (ego_x, ego_y, r)
+        # Transform global obstacle to ego frame using the same pred_state
+        # that the rest of the MPC ego frame is built from
+        if global_obs is not None:
+            gx, gy, r = global_obs
+            dx = gx - pred_state[0]
+            dy = gy - pred_state[1]
+            ct, st = np.cos(-pred_state[3]), np.sin(-pred_state[3])
+            pred_obstacle = (dx * ct - dy * st, dy * ct + dx * st, r)
+        else:
+            pred_obstacle = None
 
         x_mpc, u_mpc = mpc.solve(
             pred_ego_state, target, verbose=False, obstacle=pred_obstacle
@@ -123,6 +122,7 @@ def controller_loop(
         with shared.lock:
             shared.mpc_accel = control[0]
             shared.mpc_steer = control[1]
+            shared.mpc_base_vel = pred_state[2]
             shared.mpc_elapsed = elapsed
             shared.x_mpc_world = (
                 ego_to_global(pred_state, x_mpc) if x_mpc is not None else None
@@ -206,8 +206,8 @@ def draw_trail(
         viewer.user_scn.ngeom += 1
 
 
-def draw_obstacle(viewer: mujoco.viewer.MjViewer) -> None:
-    for ox, oy, rad in OBS:
+def draw_obstacle(viewer: mujoco.viewer.MjViewer, obstacles) -> None:
+    for idx, (ox, oy, rad) in enumerate(obstacles):
         if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
             return
         g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
@@ -260,6 +260,12 @@ def main() -> None:
         [0, 0, 2, 4, 3, 3, -1, -6, -2, -2],
         0.05,
     )
+    # Obstacles (global frame) — list of (x, y, radius)
+    obstacle_list = [
+        (7.0, 3.8, 0.375),
+        (11.5, 2.5, 0.35),
+        (7.0, -5.5, 0.65),
+    ]
 
     state_cost = final_state_cost = [
         1.0,
@@ -344,11 +350,14 @@ def main() -> None:
 
                 current_state = get_state(d, bid)
 
-                # External obstacle detection pipeline (global→ego frame)
+                # External obstacle detection pipeline (global frame)
                 detected_obs = detect_obstacle(
-                    OBS,
-                    current_state[0], current_state[1], current_state[3],
-                    current_state[2], T,
+                    obstacle_list,
+                    current_state[0],
+                    current_state[1],
+                    current_state[3],
+                    current_state[2],
+                    T,
                 )
 
                 # Sync with MPC Thread
@@ -358,6 +367,7 @@ def main() -> None:
                     mpc_elapsed = shared.mpc_elapsed
                     mpc_accel = shared.mpc_accel
                     mpc_steer = shared.mpc_steer
+                    mpc_base_vel = shared.mpc_base_vel
                     x_mpc_world = shared.x_mpc_world
 
                 # Log position etc...
@@ -371,7 +381,7 @@ def main() -> None:
 
                 # Update Zero-Order Hold control
                 control[0] = mpc_steer
-                control[1] = current_state[2] + mpc_accel * DT
+                control[1] = mpc_base_vel + (mpc_accel * DT)
 
                 # Update camera position to follow the car
                 viewer.cam.lookat[:] = [current_state[0], current_state[1], 0.0]
@@ -379,7 +389,7 @@ def main() -> None:
                 # re-draw markers
                 viewer.user_scn.ngeom = 0
                 draw_path(viewer, path)
-                draw_obstacle(viewer)
+                draw_obstacle(viewer, obstacle_list)
                 draw_trail(viewer, x_hist, y_hist)
                 if x_mpc_world is not None:
                     draw_mpc_preview(viewer, x_mpc_world)
