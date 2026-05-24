@@ -57,6 +57,7 @@ class MPCSim:
         R = [10, 10]  # input cost
         P = [10, 10]  # input rate of change cost
         self.mpc: MPC = MPC(VehicleModel(), T, DT, Q, Qf, R, P)
+        self.detected_obs: tuple[float, float, float] | None = None
 
         # Path from waypoint interpolation
         self.path: npt.NDArray[np.float64] = compute_path_from_wp(
@@ -190,6 +191,12 @@ class MPCSim:
                     while plt.fignum_exists(self.fig.number):
                         plt.pause(0.1)
                     return
+                # External obstacle detection pipeline (global→ego frame)
+                self.detected_obs = detect_obstacle(
+                    OBS,
+                    self.state[0], self.state[1], self.state[3],
+                    self.state[2], T,
+                )
                 # Get Reference_traj -> inputs are in worldframe
                 target = get_ref_trajectory(self.state, self.path, TARGET_VEL, T, DT)
 
@@ -201,11 +208,7 @@ class MPCSim:
                     curr_state,
                     target,
                     verbose=False,
-                    obstacle=detect_obstacle(
-                        OBS,
-                        self.state[0], self.state[1], self.state[3],
-                        self.state[2], T,
-                    ),
+                    obstacle=self.detected_obs,
                 )
                 self.mpc_solve_time = time.perf_counter() - t0
                 # only the first one is used to advance the simulation

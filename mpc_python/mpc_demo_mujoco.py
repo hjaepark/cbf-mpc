@@ -50,6 +50,9 @@ class SharedData:
         self.x_mpc_world: npt.NDArray[np.float64] | None = None
         self.mpc_elapsed: float = 0.0
 
+        # Externally detected obstacle (ego frame, set by physics thread)
+        self.obstacle: tuple[float, float, float] | None = None
+
 
 def controller_loop(
     mpc: MPC, path: npt.NDArray[np.float64], shared: SharedData
@@ -63,8 +66,9 @@ def controller_loop(
             if not shared.is_active or shared.goal_reached:
                 break
             current_state = shared.state.copy()  # Global [X, Y, V, Theta]
-            last_control = (shared.mpc_accel, shared.mpc_steer)
-            elapsed = shared.mpc_elapsed
+            pred_obstacle = shared.obstacle  # from external detection pipeline
+        last_control = (shared.mpc_accel, shared.mpc_steer)
+        elapsed = shared.mpc_elapsed
 
         # Check goal using absolute global coordinates
         goal_dist = np.sqrt(
@@ -93,21 +97,19 @@ def controller_loop(
         pred_state[2] += a * elapsed
         pred_state[3] += (v * np.tan(delta) / L) * elapsed
 
-        # Pretends to be the obstacle avoidance system
-        pred_obstacle = detect_obstacle(
-            OBS,
-            pred_state[0],
-            pred_state[1],
-            pred_state[3],
-            pred_state[2],
-            T,
-        )
-
         # NOTE: we convert the state in ego frame and we use a ego target
         # so we the optimization problem is a bit easier and we save some solver time
         # Get reference trajectory
         target = get_ref_trajectory(pred_state, path, TARGET_VEL, T, DT)
         pred_ego_state = [0.0, 0.0, pred_state[2], 0.0]
+
+        # latency correction: obstacle was detected at current_state time (t),
+        # but mpc plans at pred_state time (t + elapsed).
+        # the vehicle moved forward by v*elapsed → shift obstacle backward in ego frame.
+        if pred_obstacle is not None:
+            ego_x, ego_y, r = pred_obstacle
+            ego_x -= current_state[2] * elapsed
+            pred_obstacle = (ego_x, ego_y, r)
 
         x_mpc, u_mpc = mpc.solve(
             pred_ego_state, target, verbose=False, obstacle=pred_obstacle
@@ -342,9 +344,17 @@ def main() -> None:
 
                 current_state = get_state(d, bid)
 
+                # External obstacle detection pipeline (global→ego frame)
+                detected_obs = detect_obstacle(
+                    OBS,
+                    current_state[0], current_state[1], current_state[3],
+                    current_state[2], T,
+                )
+
                 # Sync with MPC Thread
                 with shared.lock:
                     shared.state[:] = current_state
+                    shared.obstacle = detected_obs
                     mpc_elapsed = shared.mpc_elapsed
                     mpc_accel = shared.mpc_accel
                     mpc_steer = shared.mpc_steer
