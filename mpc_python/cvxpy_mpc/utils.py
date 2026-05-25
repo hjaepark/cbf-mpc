@@ -35,9 +35,7 @@ def compute_path_from_wp(
     return np.vstack((final_xp, final_yp, theta))
 
 
-def get_nn_idx(
-    state: npt.NDArray[np.float64], path: npt.NDArray[np.float64]
-) -> int:
+def get_nn_idx(state: npt.NDArray[np.float64], path: npt.NDArray[np.float64]) -> int:
     """
     Finds the index of the closest element
 
@@ -53,10 +51,12 @@ def get_nn_idx(
     dist = np.hypot(dx, dy)
     nn_idx = np.argmin(dist)
     try:
-        v = np.array([
-            path[0, nn_idx + 1] - path[0, nn_idx],
-            path[1, nn_idx + 1] - path[1, nn_idx],
-        ])
+        v = np.array(
+            [
+                path[0, nn_idx + 1] - path[0, nn_idx],
+                path[1, nn_idx + 1] - path[1, nn_idx],
+            ]
+        )
         assert np.linalg.norm(v) > 0, "zero-length path segment"
         v /= np.linalg.norm(v)
         d = [path[0, nn_idx] - state[0], path[1, nn_idx] - state[1]]
@@ -189,3 +189,48 @@ def compute_errors(
     heading_err = (current_state[3] - target_heading + np.pi) % (2.0 * np.pi) - np.pi
 
     return (cte, heading_err)
+
+
+def detect_obstacle_camera(
+    obstacles: list[tuple[float, float, float]],
+    robot_x: float,
+    robot_y: float,
+    robot_heading: float,
+    max_range: float,
+    fov_degrees: float = 60.0,
+) -> tuple[float, float, float] | None:
+
+    closest = None
+    closest_dist = float("inf")
+    fov_rad = np.radians(fov_degrees)
+
+    for obs_x, obs_y, obs_r in obstacles:
+        dx = obs_x - robot_x
+        dy = obs_y - robot_y
+        d = np.hypot(dx, dy)
+
+        dist_to_edge = max(0.0, d - obs_r)
+
+        if dist_to_edge > max_range:
+            continue
+
+        ct = np.cos(-robot_heading)
+        st = np.sin(-robot_heading)
+        ego_x = dx * ct - dy * st
+        ego_y = dy * ct + dx * st
+        angle_to_obs_center = abs(np.arctan2(ego_y, ego_x))
+
+        if d > 0:
+            angular_radius = np.arcsin(min(1.0, obs_r / d))
+        else:
+            angular_radius = np.pi
+
+        # Check if the closest edge of the obstacle falls within half the FOV
+        if (angle_to_obs_center - angular_radius) <= (fov_rad / 2.0):
+
+            # We track the closest obstacle by its closest EDGE, not its center
+            if dist_to_edge < closest_dist:
+                closest_dist = dist_to_edge
+                closest = (obs_x, obs_y, obs_r)
+
+    return closest

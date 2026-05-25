@@ -35,6 +35,7 @@ class MPC:
         self.vehicle: VehicleModel = vehicle
         self.dt: float = DT
         self.control_horizon: int = int(T / DT)
+        self.vehicle_buffer: float = self.vehicle.buffer
 
         self.Q: npt.NDArray[np.float64] = np.diag(state_cost)
         self.Qf: npt.NDArray[np.float64] = np.diag(final_state_cost)
@@ -79,6 +80,19 @@ class MPC:
         self.p_cross_ref_param = opt.Parameter(self.control_horizon + 1)
         self.v_ref_param = opt.Parameter(self.control_horizon + 1)
         self.theta_ref_param = opt.Parameter(self.control_horizon + 1)
+
+        # Obstacle params (half-plane linearization)
+        self.obs_n_x = opt.Parameter(self.control_horizon, name="obs_nx")
+        self.obs_n_y = opt.Parameter(self.control_horizon, name="obs_ny")
+        self.obs_safe_dist = opt.Parameter(self.control_horizon, name="obs_dist")
+        # In optimization, a "slack" variable is a mathematical fudge factor.
+        # Instead of treating the obstacle as an unyielding concrete wall,
+        # we treat it as a stiff rubber wall. This variable tracks *how much*
+        # we dent the wall if the vehicle is physically forced into it.
+        # This allows in practice to turn the obstacle factor from hard(may cause failures) to soft
+        self.slack_obs: opt.Variable = opt.Variable(
+            self.control_horizon, nonneg=True, name="obstacle_slacks"
+        )
 
         # optimised vars
         self.prev_cmd: npt.NDArray[np.float64] | None = None
@@ -177,6 +191,29 @@ class MPC:
             )
             cost += opt.quad_form(e, self.Q)
 
+            # Obstacle half-plane constraint:
+            # obstacle avoidance: (px - pobs)*2 > R  in non-convex :(
+            # this is linearised as : dot(px - pbos, n) > R
+            # where n is a normal pointing from obstacle center toward the reference trajectory.
+            # so the optimiser knows to stay on the same side of the obstacle as the reference
+            #
+            #      Valid Region
+            #            ^
+            #            | n = (nx, ny)
+            #            * p_ref
+            #            |
+            #    --------+---------- Half-Plane
+            #            | R
+            #            * p_obs
+            #
+            # Hard Constraint:  dot(n, p) >= Safe_Distance
+            # Soft Constraint:  dot(n, p) >= Safe_Distance - Slack
+            constr += [
+                self.obs_n_x[k] * self.x[0, k + 1] + self.obs_n_y[k] * self.x[1, k + 1]
+                >= self.obs_safe_dist[k] - self.slack_obs[k]
+            ]
+            cost += 1e5 * self.slack_obs[k]
+
             # Actuation magnitude cost
             cost += opt.quad_form(self.u[:, k], self.R)
 
@@ -247,9 +284,12 @@ class MPC:
         verbose: bool = False,
         max_iter: int = 3,
         tolerance: float = 1e-2,
+        obstacle: tuple[float, float, float] | None = None,
     ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
         assert len(initial_state) == self.nx
         assert target.shape == (self.nx, self.control_horizon + 1)
+
+        obs_x, obs_y, obs_r = obstacle if obstacle is not None else (None, None, None)
 
         self.initial_state_param.value = np.array(initial_state)
         self.last_cmd_param.value = (
@@ -317,6 +357,36 @@ class MPC:
                 self.B_params[k].value = B_k
                 self.C_params[k].value = C_k
 
+            # Obstacle half-plane params (based on x_guess at step k+1)
+            obs_nx_vals = np.zeros(self.control_horizon)
+            obs_ny_vals = np.zeros(self.control_horizon)
+            obs_dist_vals = np.zeros(self.control_horizon)
+            for k in range(self.control_horizon):
+                if obstacle is None:
+                    # turn this in something trivial for the optimiser
+                    obs_nx_vals[k] = 1.0
+                    obs_ny_vals[k] = 0.0
+                    obs_dist_vals[k] = -1000.0
+                else:
+                    # We need a stable point to calculate the normal vector.
+                    dx = x_ref[k + 1] - obs_x
+                    dy = y_ref[k + 1] - obs_y
+                    dist = np.hypot(dx, dy)
+                    dist = dist if dist > 1e-5 else 1e-5
+                    # [x,y] components of vector n
+                    nx = dx / dist
+                    ny = dy / dist
+
+                    obs_nx_vals[k] = nx
+                    obs_ny_vals[k] = ny
+                    obs_dist_vals[k] = (
+                        nx * obs_x + ny * obs_y + obs_r
+                    )
+
+            self.obs_n_x.value = obs_nx_vals
+            self.obs_n_y.value = obs_ny_vals
+            self.obs_safe_dist.value = obs_dist_vals + self.vehicle_buffer
+
             self.prob.solve(
                 solver=opt.CLARABEL,
                 warm_start=True,
@@ -326,7 +396,7 @@ class MPC:
             )
 
             if self.x.value is None:
-                # the oprimiser failed!
+                # the optimiser failed!
                 # In this case you want to initialise a recovery behaviour!
                 # To make this simple here I just decelerate
                 print("MPC failed -> Emergency braking!")

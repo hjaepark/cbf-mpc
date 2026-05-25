@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import signal
 import time
 
 import sys
 
 import matplotlib.pyplot as plt
+from matplotlib.patches import Wedge
 import numpy as np
 import numpy.typing as npt
 from cvxpy_mpc import MPC, VehicleModel
-from cvxpy_mpc.utils import compute_path_from_wp, ego_to_global, get_ref_trajectory
+from cvxpy_mpc.utils import (
+    compute_path_from_wp,
+    detect_obstacle_camera,
+    ego_to_global,
+    get_ref_trajectory,
+)
 from scipy.integrate import odeint
 
 # Robot Starting position
@@ -21,9 +28,24 @@ SIM_START_H = 0.0
 
 
 # Params
+USE_OBS_AVOIDANCE = True
+
+# Params
 TARGET_VEL = 1.0  # m/s
 T = 5  # Prediction Horizon [s]
 DT = 0.2  # discretization step [s]
+
+OBS = (
+    [
+        (4.0, 2.2, 0.5),
+        (12.5, 0.5, 0.35),
+        (7.0, -5.5, 0.45),
+    ]
+    if USE_OBS_AVOIDANCE
+    else []
+)
+SENSOR_MAX_RANGE = 4.0
+SENSOR_FOV_DEG = 90.0
 
 
 # Classes
@@ -44,6 +66,7 @@ class MPCSim:
         R = [10, 10]  # input cost
         P = [10, 10]  # input rate of change cost
         self.mpc: MPC = MPC(VehicleModel(), T, DT, Q, Qf, R, P)
+        self.detected_obs: tuple[float, float, float] | None = None
 
         # Path from waypoint interpolation
         self.path: npt.NDArray[np.float64] = compute_path_from_wp(
@@ -86,6 +109,31 @@ class MPCSim:
         self.ax_main.set_ylim(
             self.path[1, :].min() - y_pad, self.path[1, :].max() + y_pad
         )
+
+        # Obstacle visualization
+        self.obs_circles: list[plt.Circle] = []
+        if USE_OBS_AVOIDANCE:
+            for ox, oy, rad in OBS:
+                c = plt.Circle(
+                    (ox, oy),
+                    rad,
+                    color="red",
+                    alpha=0.4,
+                    label="obstacle",
+                )
+                self.ax_main.add_patch(c)
+                self.obs_circles.append(c)
+
+            # Sensor FOV wedge
+            self.fov_patch = Wedge(
+                (0, 0),
+                SENSOR_MAX_RANGE,
+                0,
+                0,
+                color="gold",
+                alpha=0.15,
+            )
+            self.ax_main.add_patch(self.fov_patch)
 
         (self.traj_line,) = self.ax_main.plot(
             [],
@@ -154,7 +202,6 @@ class MPCSim:
 
     def run(self) -> None:
         self.plot_sim()
-        input("Press Enter to continue...")
         try:
             while 1:
                 if (
@@ -164,16 +211,47 @@ class MPCSim:
                     )
                     < 0.5
                 ):
-                    print("Success! Goal Reached")
-                    input("Press Enter to continue...")
+                    print(
+                        "Success! Goal Reached\nClose the plot window or press CTRL-C to exit."
+                    )
+                    while plt.fignum_exists(self.fig.number):
+                        plt.pause(0.1)
                     return
+                # External obstacle detection pipeline
+                if USE_OBS_AVOIDANCE:
+                    self.detected_obs = detect_obstacle_camera(
+                        OBS,
+                        self.state[0],
+                        self.state[1],
+                        self.state[3],
+                        SENSOR_MAX_RANGE,
+                        SENSOR_FOV_DEG,
+                    )
+                else:
+                    self.detected_obs = None
                 # Get Reference_traj -> inputs are in worldframe
                 target = get_ref_trajectory(self.state, self.path, TARGET_VEL, T, DT)
 
                 # dynamycs w.r.t robot frame
                 curr_state = np.array([0, 0, self.state[2], 0])
+
+                # Transform global obstacle to ego frame
+                if self.detected_obs is not None:
+                    gx, gy, r = self.detected_obs
+                    dx = gx - self.state[0]
+                    dy = gy - self.state[1]
+                    ct, st = np.cos(-self.state[3]), np.sin(-self.state[3])
+                    obs_ego = (dx * ct - dy * st, dy * ct + dx * st, r)
+                else:
+                    obs_ego = None
+
                 t0 = time.perf_counter()
-                x_mpc, u_mpc = self.mpc.solve(curr_state, target, verbose=False)
+                x_mpc, u_mpc = self.mpc.solve(
+                    curr_state,
+                    target,
+                    verbose=False,
+                    obstacle=obs_ego,
+                )
                 self.mpc_solve_time = time.perf_counter() - t0
                 # only the first one is used to advance the simulation
 
@@ -196,7 +274,7 @@ class MPCSim:
                 self.d_history.append(self.control[1])
                 self.plot_sim()
         except KeyboardInterrupt:
-            pass
+            print("\nInterrupted by user (CTRL-C). Exiting...")
 
     def predict_next_state(
         self,
@@ -243,13 +321,27 @@ class MPCSim:
             self.ax_main, self.x_history[-1], self.y_history[-1], self.h_history[-1]
         )
 
+        # Sensor FOV wedge
+        if USE_OBS_AVOIDANCE:
+            half_fov = SENSOR_FOV_DEG / 2
+            theta1 = np.degrees(self.h_history[-1]) - half_fov
+            theta2 = np.degrees(self.h_history[-1]) + half_fov
+            self.fov_patch.set_center((self.x_history[-1], self.y_history[-1]))
+            self.fov_patch.set_theta1(theta1)
+            self.fov_patch.set_theta2(theta2)
+
         # HUD
         goal_dist = np.sqrt(
             (self.state[0] - self.path[0, -1]) ** 2
             + (self.state[1] - self.path[1, -1]) ** 2
         )
+        avoiding = (
+            "YES"
+            if self.detected_obs is not None
+            else "no" if USE_OBS_AVOIDANCE else "off"
+        )
         self.hud.set_text(
-            f"v: {self.state[2]:.2f} m/s  |  goal: {goal_dist:.2f} m  |  MPC: {self.mpc_solve_time*1000:.0f} ms"
+            f"v: {self.state[2]:.2f} m/s  |  goal: {goal_dist:.2f} m  |  avoid: {avoiding}  |  MPC: {self.mpc_solve_time*1000:.0f} ms"
         )
 
         # Subplot data: plot against time
@@ -303,6 +395,7 @@ def plot_car(ax: plt.Axes, x: float, y: float, yaw: float) -> plt.Line2D:
 
 
 def do_sim() -> None:
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     sim = MPCSim()
     try:
         sim.run()

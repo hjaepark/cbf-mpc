@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import pathlib
-import select
-import sys
+import signal
 import threading
 import time
 
@@ -15,13 +14,18 @@ from cvxpy_mpc import MPC, VehicleModel
 from cvxpy_mpc.utils import (
     compute_path_from_wp,
     compute_errors,
+    detect_obstacle_camera,
     ego_to_global,
     get_ref_trajectory,
 )
 
+USE_OBS_AVOIDANCE = True
+
 TARGET_VEL = 1.0
 T = 4.0
-DT = 0.2  # controller time step
+DT = 0.2
+SENSOR_MAX_RANGE = 4.0
+SENSOR_FOV_DEG = 90.0
 
 
 # MPC and sim are on 2 threads
@@ -38,10 +42,14 @@ class SharedData:
         self.is_active: bool = True
         self.mpc_accel: float = 0.0
         self.mpc_steer: float = 0.0
+        self.mpc_base_vel: float = 0.0
 
         # Telemetry & visualization
         self.x_mpc_world: npt.NDArray[np.float64] | None = None
         self.mpc_elapsed: float = 0.0
+
+        # Externally detected obstacle (ego frame, set by physics thread)
+        self.obstacle: tuple[float, float, float] | None = None
 
 
 def controller_loop(
@@ -56,8 +64,11 @@ def controller_loop(
             if not shared.is_active or shared.goal_reached:
                 break
             current_state = shared.state.copy()  # Global [X, Y, V, Theta]
-            last_control = (shared.mpc_accel, shared.mpc_steer)
-            elapsed = shared.mpc_elapsed
+            global_obs = (
+                shared.obstacle
+            )  # from external detection pipeline (global frame)
+        last_control = (shared.mpc_accel, shared.mpc_steer)
+        elapsed = shared.mpc_elapsed
 
         # Check goal using absolute global coordinates
         goal_dist = np.sqrt(
@@ -91,7 +102,21 @@ def controller_loop(
         # Get reference trajectory
         target = get_ref_trajectory(pred_state, path, TARGET_VEL, T, DT)
         pred_ego_state = [0.0, 0.0, pred_state[2], 0.0]
-        x_mpc, u_mpc = mpc.solve(pred_ego_state, target, verbose=False)
+
+        # Transform global obstacle to ego frame using the same pred_state
+        # that the rest of the MPC ego frame is built from
+        if global_obs is not None:
+            gx, gy, r = global_obs
+            dx = gx - pred_state[0]
+            dy = gy - pred_state[1]
+            ct, st = np.cos(-pred_state[3]), np.sin(-pred_state[3])
+            pred_obstacle = (dx * ct - dy * st, dy * ct + dx * st, r)
+        else:
+            pred_obstacle = None
+
+        x_mpc, u_mpc = mpc.solve(
+            pred_ego_state, target, verbose=False, obstacle=pred_obstacle
+        )
 
         # Extract the immediate next optimal control actions
         control = (u_mpc[0, 0], u_mpc[1, 0])
@@ -101,6 +126,7 @@ def controller_loop(
         with shared.lock:
             shared.mpc_accel = control[0]
             shared.mpc_steer = control[1]
+            shared.mpc_base_vel = pred_state[2]
             shared.mpc_elapsed = elapsed
             shared.x_mpc_world = (
                 ego_to_global(pred_state, x_mpc) if x_mpc is not None else None
@@ -184,6 +210,22 @@ def draw_trail(
         viewer.user_scn.ngeom += 1
 
 
+def draw_obstacle(viewer: mujoco.viewer.MjViewer, obstacles) -> None:
+    for idx, (ox, oy, rad) in enumerate(obstacles):
+        if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
+            return
+        g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
+        mujoco.mjv_initGeom(
+            g,
+            type=mujoco.mjtGeom.mjGEOM_SPHERE,
+            size=np.array([rad, 0.0, 0.0], dtype=np.float64),
+            pos=np.array([ox, oy, 0.0], dtype=np.float64),
+            mat=np.eye(3).ravel(),
+            rgba=np.array([1, 0, 0, 0.4], dtype=np.float32),
+        )
+        viewer.user_scn.ngeom += 1
+
+
 def draw_mpc_preview(
     viewer: mujoco.viewer.MjViewer, x_mpc_world: npt.NDArray[np.float64]
 ) -> None:
@@ -207,6 +249,68 @@ def draw_mpc_preview(
         viewer.user_scn.ngeom += 1
 
 
+def draw_sensor_fov(
+    viewer: mujoco.viewer.MjViewer,
+    x: float,
+    y: float,
+    heading: float,
+    max_range: float,
+    fov_deg: float,
+) -> None:
+    fov_rad = np.radians(fov_deg)
+    right_angle = heading - fov_rad / 2.0
+    left_angle = heading + fov_rad / 2.0
+
+    right_end = np.array(
+        [x + max_range * np.cos(right_angle), y + max_range * np.sin(right_angle), 0.0]
+    )
+    left_end = np.array(
+        [x + max_range * np.cos(left_angle), y + max_range * np.sin(left_angle), 0.0]
+    )
+    origin = np.array([x, y, 0.0])
+
+    rgba = np.array([0.8, 0.8, 0, 0.2], dtype=np.float32)
+
+    for end in (right_end, left_end):
+        if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
+            return
+        g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
+        mujoco.mjv_initGeom(
+            g,
+            type=mujoco.mjtGeom.mjGEOM_CAPSULE,
+            size=np.array([0.02, 0.0, 0.0], dtype=np.float64),
+            pos=np.zeros(3, dtype=np.float64),
+            mat=np.eye(3).ravel(),
+            rgba=rgba,
+        )
+        mujoco.mjv_connector(g, mujoco.mjtGeom.mjGEOM_CAPSULE, 0.01, origin, end)
+        viewer.user_scn.ngeom += 1
+
+    num_arc_pts = 20
+    prev = None
+    for i in range(num_arc_pts + 1):
+        if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
+            return
+        t = i / num_arc_pts
+        angle = right_angle + t * fov_rad
+        p = np.array(
+            [x + max_range * np.cos(angle), y + max_range * np.sin(angle), 0.0]
+        )
+        if prev is not None:
+            g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
+            mujoco.mjv_initGeom(
+                g,
+                type=mujoco.mjtGeom.mjGEOM_CAPSULE,
+                size=np.array([0.01, 0.0, 0.0], dtype=np.float64),
+                pos=np.zeros(3, dtype=np.float64),
+                mat=np.eye(3).ravel(),
+                rgba=rgba,
+            )
+            mujoco.mjv_connector(g, mujoco.mjtGeom.mjGEOM_CAPSULE, 0.01, prev, p)
+            viewer.user_scn.ngeom += 1
+        prev = p
+
+
 # here we run the sim loop
 def main() -> None:
     model_path = pathlib.Path(__file__).parent / "models" / "mushr" / "mush_nano.xml"
@@ -223,22 +327,29 @@ def main() -> None:
         0.05,
     )
 
-    state_cost = [
+    # only used when USE_OBS_AVOIDANCE
+    obstacle_list = [
+        (7.0, 3.8, 0.375),
+        (11.5, 2.5, 0.35),
+        (7.0, -5.5, 0.65),
+    ]
+
+    state_cost = final_state_cost = [
         1.0,
-        80.0,
+        50.0,
         10.0,
         20.0,
     ]  # [Along-track, Cross-track, Velocity, Heading]
-    actuation_cost = [10.0, 10.0]
+    actuation_cost = actuation_rate_cost = [10.0, 10.0]  # [Acceleration, Steer]
 
     mpc = MPC(
         VehicleModel(),
         T,
         DT,
         state_cost,
-        state_cost,
+        final_state_cost,
         actuation_cost,
-        actuation_cost,
+        actuation_rate_cost,
     )
 
     steer_jnt = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, "buddy_steering_wheel")
@@ -248,6 +359,8 @@ def main() -> None:
     mpc_thread = threading.Thread(
         target=controller_loop, args=(mpc, path, shared), daemon=True
     )
+
+    signal.signal(signal.SIGINT, signal.default_int_handler)
 
     with mujoco.viewer.launch_passive(m, d) as viewer:
         viewer.cam.lookat[:] = [0.0, 0.0, 0.0]
@@ -267,10 +380,9 @@ def main() -> None:
         heading_rmse = -1
 
         sim_start_time = time.perf_counter()
+        mpc_thread.start()
 
         try:
-            input("\033[92mPress Enter to continue...\033[0m")
-            mpc_thread.start()
 
             while viewer.is_running():
 
@@ -305,12 +417,27 @@ def main() -> None:
 
                 current_state = get_state(d, bid)
 
+                # External obstacle detection pipeline (global frame)
+                if USE_OBS_AVOIDANCE:
+                    detected_obs = detect_obstacle_camera(
+                        obstacle_list,
+                        current_state[0],
+                        current_state[1],
+                        current_state[3],
+                        SENSOR_MAX_RANGE,
+                        SENSOR_FOV_DEG,
+                    )
+                else:
+                    detected_obs = None
+
                 # Sync with MPC Thread
                 with shared.lock:
                     shared.state[:] = current_state
+                    shared.obstacle = detected_obs
                     mpc_elapsed = shared.mpc_elapsed
                     mpc_accel = shared.mpc_accel
                     mpc_steer = shared.mpc_steer
+                    mpc_base_vel = shared.mpc_base_vel
                     x_mpc_world = shared.x_mpc_world
 
                 # Log position etc...
@@ -324,7 +451,7 @@ def main() -> None:
 
                 # Update Zero-Order Hold control
                 control[0] = mpc_steer
-                control[1] = current_state[2] + mpc_accel * DT
+                control[1] = mpc_base_vel + (mpc_accel * DT)
 
                 # Update camera position to follow the car
                 viewer.cam.lookat[:] = [current_state[0], current_state[1], 0.0]
@@ -332,6 +459,16 @@ def main() -> None:
                 # re-draw markers
                 viewer.user_scn.ngeom = 0
                 draw_path(viewer, path)
+                if USE_OBS_AVOIDANCE:
+                    draw_obstacle(viewer, obstacle_list)
+                    draw_sensor_fov(
+                        viewer,
+                        current_state[0],
+                        current_state[1],
+                        current_state[3],
+                        SENSOR_MAX_RANGE,
+                        SENSOR_FOV_DEG,
+                    )
                 draw_trail(viewer, x_hist, y_hist)
                 if x_mpc_world is not None:
                     draw_mpc_preview(viewer, x_mpc_world)
@@ -352,7 +489,8 @@ def main() -> None:
                             f"MPC:    accel {mpc_accel:.2f} m/s2  |  steer {np.degrees(mpc_steer):.1f} deg  |  {mpc_elapsed*1000:.0f} ms\n"
                             f"error:  CTE {cte:.3f} m  |  heading {np.degrees(heading_err):.1f} deg\n"
                             f"RMSE:   CTE {cte_rmse:.3f} m  |  heading {heading_rmse:.1f} deg\n"
-                            f"goal:   {goal_dist:.2f} m\n",
+                            f"goal:   {goal_dist:.2f} m\n"
+                            f"avoid:  {'YES' if detected_obs is not None else 'no' if USE_OBS_AVOIDANCE else 'off'}\n",
                             "",
                         )
                     ]
