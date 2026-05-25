@@ -14,14 +14,16 @@ from cvxpy_mpc import MPC, VehicleModel
 from cvxpy_mpc.utils import (
     compute_path_from_wp,
     compute_errors,
-    detect_obstacle,
+    detect_obstacle_camera,
     ego_to_global,
     get_ref_trajectory,
 )
 
 TARGET_VEL = 1.0
 T = 4.0
-DT = 0.2  # controller time step
+DT = 0.2
+SENSOR_MAX_RANGE = 4.0
+SENSOR_FOV_DEG = 90.0
 
 
 # MPC and sim are on 2 threads
@@ -245,6 +247,68 @@ def draw_mpc_preview(
         viewer.user_scn.ngeom += 1
 
 
+def draw_sensor_fov(
+    viewer: mujoco.viewer.MjViewer,
+    x: float,
+    y: float,
+    heading: float,
+    max_range: float,
+    fov_deg: float,
+) -> None:
+    fov_rad = np.radians(fov_deg)
+    right_angle = heading - fov_rad / 2.0
+    left_angle = heading + fov_rad / 2.0
+
+    right_end = np.array(
+        [x + max_range * np.cos(right_angle), y + max_range * np.sin(right_angle), 0.0]
+    )
+    left_end = np.array(
+        [x + max_range * np.cos(left_angle), y + max_range * np.sin(left_angle), 0.0]
+    )
+    origin = np.array([x, y, 0.0])
+
+    rgba = np.array([0.8, 0.8, 0, 0.2], dtype=np.float32)
+
+    for end in (right_end, left_end):
+        if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
+            return
+        g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
+        mujoco.mjv_initGeom(
+            g,
+            type=mujoco.mjtGeom.mjGEOM_CAPSULE,
+            size=np.array([0.02, 0.0, 0.0], dtype=np.float64),
+            pos=np.zeros(3, dtype=np.float64),
+            mat=np.eye(3).ravel(),
+            rgba=rgba,
+        )
+        mujoco.mjv_connector(g, mujoco.mjtGeom.mjGEOM_CAPSULE, 0.01, origin, end)
+        viewer.user_scn.ngeom += 1
+
+    num_arc_pts = 20
+    prev = None
+    for i in range(num_arc_pts + 1):
+        if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
+            return
+        t = i / num_arc_pts
+        angle = right_angle + t * fov_rad
+        p = np.array(
+            [x + max_range * np.cos(angle), y + max_range * np.sin(angle), 0.0]
+        )
+        if prev is not None:
+            g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
+            mujoco.mjv_initGeom(
+                g,
+                type=mujoco.mjtGeom.mjGEOM_CAPSULE,
+                size=np.array([0.01, 0.0, 0.0], dtype=np.float64),
+                pos=np.zeros(3, dtype=np.float64),
+                mat=np.eye(3).ravel(),
+                rgba=rgba,
+            )
+            mujoco.mjv_connector(g, mujoco.mjtGeom.mjGEOM_CAPSULE, 0.01, prev, p)
+            viewer.user_scn.ngeom += 1
+        prev = p
+
+
 # here we run the sim loop
 def main() -> None:
     model_path = pathlib.Path(__file__).parent / "models" / "mushr" / "mush_nano.xml"
@@ -351,13 +415,13 @@ def main() -> None:
                 current_state = get_state(d, bid)
 
                 # External obstacle detection pipeline (global frame)
-                detected_obs = detect_obstacle(
+                detected_obs = detect_obstacle_camera(
                     obstacle_list,
                     current_state[0],
                     current_state[1],
                     current_state[3],
-                    current_state[2],
-                    T,
+                    SENSOR_MAX_RANGE,
+                    SENSOR_FOV_DEG,
                 )
 
                 # Sync with MPC Thread
@@ -390,6 +454,14 @@ def main() -> None:
                 viewer.user_scn.ngeom = 0
                 draw_path(viewer, path)
                 draw_obstacle(viewer, obstacle_list)
+                draw_sensor_fov(
+                    viewer,
+                    current_state[0],
+                    current_state[1],
+                    current_state[3],
+                    SENSOR_MAX_RANGE,
+                    SENSOR_FOV_DEG,
+                )
                 draw_trail(viewer, x_hist, y_hist)
                 if x_mpc_world is not None:
                     draw_mpc_preview(viewer, x_mpc_world)
@@ -410,7 +482,8 @@ def main() -> None:
                             f"MPC:    accel {mpc_accel:.2f} m/s2  |  steer {np.degrees(mpc_steer):.1f} deg  |  {mpc_elapsed*1000:.0f} ms\n"
                             f"error:  CTE {cte:.3f} m  |  heading {np.degrees(heading_err):.1f} deg\n"
                             f"RMSE:   CTE {cte_rmse:.3f} m  |  heading {heading_rmse:.1f} deg\n"
-                            f"goal:   {goal_dist:.2f} m\n",
+                            f"goal:   {goal_dist:.2f} m\n"
+                            f"avoid:  {'YES' if detected_obs is not None else 'no'}\n",
                             "",
                         )
                     ]
