@@ -28,16 +28,22 @@ SIM_START_H = 0.0
 
 
 # Params
+USE_OBS_AVOIDANCE = True
+
+# Params
 TARGET_VEL = 1.0  # m/s
 T = 5  # Prediction Horizon [s]
 DT = 0.2  # discretization step [s]
 
-# Obstacles (global frame) — list of (x, y, radius)
-OBS = [
-    (4.0, 2.2, 0.5),
-    (12.5, 0.5, 0.35),
-    (7.0, -5.5, 0.45),
-]
+OBS = (
+    [
+        (4.0, 2.2, 0.5),
+        (12.5, 0.5, 0.35),
+        (7.0, -5.5, 0.45),
+    ]
+    if USE_OBS_AVOIDANCE
+    else []
+)
 SENSOR_MAX_RANGE = 4.0
 SENSOR_FOV_DEG = 90.0
 
@@ -106,27 +112,28 @@ class MPCSim:
 
         # Obstacle visualization
         self.obs_circles: list[plt.Circle] = []
-        for ox, oy, rad in OBS:
-            c = plt.Circle(
-                (ox, oy),
-                rad,
-                color="red",
-                alpha=0.4,
-                label="obstacle",
-            )
-            self.ax_main.add_patch(c)
-            self.obs_circles.append(c)
+        if USE_OBS_AVOIDANCE:
+            for ox, oy, rad in OBS:
+                c = plt.Circle(
+                    (ox, oy),
+                    rad,
+                    color="red",
+                    alpha=0.4,
+                    label="obstacle",
+                )
+                self.ax_main.add_patch(c)
+                self.obs_circles.append(c)
 
-        # Sensor FOV wedge
-        self.fov_patch = Wedge(
-            (0, 0),
-            SENSOR_MAX_RANGE,
-            0,
-            0,
-            color="gold",
-            alpha=0.15,
-        )
-        self.ax_main.add_patch(self.fov_patch)
+            # Sensor FOV wedge
+            self.fov_patch = Wedge(
+                (0, 0),
+                SENSOR_MAX_RANGE,
+                0,
+                0,
+                color="gold",
+                alpha=0.15,
+            )
+            self.ax_main.add_patch(self.fov_patch)
 
         (self.traj_line,) = self.ax_main.plot(
             [],
@@ -211,14 +218,17 @@ class MPCSim:
                         plt.pause(0.1)
                     return
                 # External obstacle detection pipeline
-                self.detected_obs = detect_obstacle_camera(
-                    OBS,
-                    self.state[0],
-                    self.state[1],
-                    self.state[3],
-                    SENSOR_MAX_RANGE,
-                    SENSOR_FOV_DEG,
-                )
+                if USE_OBS_AVOIDANCE:
+                    self.detected_obs = detect_obstacle_camera(
+                        OBS,
+                        self.state[0],
+                        self.state[1],
+                        self.state[3],
+                        SENSOR_MAX_RANGE,
+                        SENSOR_FOV_DEG,
+                    )
+                else:
+                    self.detected_obs = None
                 # Get Reference_traj -> inputs are in worldframe
                 target = get_ref_trajectory(self.state, self.path, TARGET_VEL, T, DT)
 
@@ -312,19 +322,24 @@ class MPCSim:
         )
 
         # Sensor FOV wedge
-        half_fov = SENSOR_FOV_DEG / 2
-        theta1 = np.degrees(self.h_history[-1]) - half_fov
-        theta2 = np.degrees(self.h_history[-1]) + half_fov
-        self.fov_patch.set_center((self.x_history[-1], self.y_history[-1]))
-        self.fov_patch.set_theta1(theta1)
-        self.fov_patch.set_theta2(theta2)
+        if USE_OBS_AVOIDANCE:
+            half_fov = SENSOR_FOV_DEG / 2
+            theta1 = np.degrees(self.h_history[-1]) - half_fov
+            theta2 = np.degrees(self.h_history[-1]) + half_fov
+            self.fov_patch.set_center((self.x_history[-1], self.y_history[-1]))
+            self.fov_patch.set_theta1(theta1)
+            self.fov_patch.set_theta2(theta2)
 
         # HUD
         goal_dist = np.sqrt(
             (self.state[0] - self.path[0, -1]) ** 2
             + (self.state[1] - self.path[1, -1]) ** 2
         )
-        avoiding = "YES" if self.detected_obs is not None else "no"
+        avoiding = (
+            "YES"
+            if self.detected_obs is not None
+            else "no" if USE_OBS_AVOIDANCE else "off"
+        )
         self.hud.set_text(
             f"v: {self.state[2]:.2f} m/s  |  goal: {goal_dist:.2f} m  |  avoid: {avoiding}  |  MPC: {self.mpc_solve_time*1000:.0f} ms"
         )

@@ -19,6 +19,8 @@ from cvxpy_mpc.utils import (
     get_ref_trajectory,
 )
 
+USE_OBS_AVOIDANCE = True
+
 TARGET_VEL = 1.0
 T = 4.0
 DT = 0.2
@@ -324,7 +326,8 @@ def main() -> None:
         [0, 0, 2, 4, 3, 3, -1, -6, -2, -2],
         0.05,
     )
-    # Obstacles (global frame) — list of (x, y, radius)
+
+    # only used when USE_OBS_AVOIDANCE
     obstacle_list = [
         (7.0, 3.8, 0.375),
         (11.5, 2.5, 0.35),
@@ -415,14 +418,17 @@ def main() -> None:
                 current_state = get_state(d, bid)
 
                 # External obstacle detection pipeline (global frame)
-                detected_obs = detect_obstacle_camera(
-                    obstacle_list,
-                    current_state[0],
-                    current_state[1],
-                    current_state[3],
-                    SENSOR_MAX_RANGE,
-                    SENSOR_FOV_DEG,
-                )
+                if USE_OBS_AVOIDANCE:
+                    detected_obs = detect_obstacle_camera(
+                        obstacle_list,
+                        current_state[0],
+                        current_state[1],
+                        current_state[3],
+                        SENSOR_MAX_RANGE,
+                        SENSOR_FOV_DEG,
+                    )
+                else:
+                    detected_obs = None
 
                 # Sync with MPC Thread
                 with shared.lock:
@@ -453,15 +459,16 @@ def main() -> None:
                 # re-draw markers
                 viewer.user_scn.ngeom = 0
                 draw_path(viewer, path)
-                draw_obstacle(viewer, obstacle_list)
-                draw_sensor_fov(
-                    viewer,
-                    current_state[0],
-                    current_state[1],
-                    current_state[3],
-                    SENSOR_MAX_RANGE,
-                    SENSOR_FOV_DEG,
-                )
+                if USE_OBS_AVOIDANCE:
+                    draw_obstacle(viewer, obstacle_list)
+                    draw_sensor_fov(
+                        viewer,
+                        current_state[0],
+                        current_state[1],
+                        current_state[3],
+                        SENSOR_MAX_RANGE,
+                        SENSOR_FOV_DEG,
+                    )
                 draw_trail(viewer, x_hist, y_hist)
                 if x_mpc_world is not None:
                     draw_mpc_preview(viewer, x_mpc_world)
@@ -483,7 +490,7 @@ def main() -> None:
                             f"error:  CTE {cte:.3f} m  |  heading {np.degrees(heading_err):.1f} deg\n"
                             f"RMSE:   CTE {cte_rmse:.3f} m  |  heading {heading_rmse:.1f} deg\n"
                             f"goal:   {goal_dist:.2f} m\n"
-                            f"avoid:  {'YES' if detected_obs is not None else 'no'}\n",
+                            f"avoid:  {'YES' if detected_obs is not None else 'no' if USE_OBS_AVOIDANCE else 'off'}\n",
                             "",
                         )
                     ]
