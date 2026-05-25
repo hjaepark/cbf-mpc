@@ -9,15 +9,16 @@ A (hopefully) easy-to-follow  Iterative MPC tracking controller built with CVXPY
 
 This mainly uses **[CVXPY](https://www.cvxpy.org/)** to maintain a strict quadratic programming framework rather than relying on a non-linear solver like CasADi (which I love btw!). But, implementing an iMPC, we can still bridge the gap between convex optimization and real-world vehicle physics, allowing you to handle non-linear kinematics through iterative linearization.
 
-<figure>
-  <img src="img/demo-mujoco.gif" width="500" />
-  <figcaption>MuJoCo simulation with the mushr car model</figcaption>
-</figure>
-
-<figure>
-  <img src="img/demo.gif" width="500" />
-  <figcaption>Headless toy demo with dummy car</figcaption>
-</figure>
+<table>
+  <tr>
+    <td><figure><img src="img/demo-mujoco.gif" width="500" /><figcaption>MuJoCo simulation with the mushr car model (without obstacles)</figcaption></figure></td>
+    <td><figure><img src="img/demo-mujoco_with_obs.gif" width="500" /><figcaption>MuJoCo simulation with obstacle avoidance</figcaption></figure></td>
+  </tr>
+  <tr>
+    <td><figure><img src="img/demo.gif" width="500" /><figcaption>Headless toy demo with dummy car (without obstacles)</figcaption></figure></td>
+    <td><figure><img src="img/demo_with_obs.gif" width="500" /><figcaption>Headless toy demo with obstacle avoidance</figcaption></figure></td>
+  </tr>
+</table>
 
 Note: I've also preserved my original notebooks on Model Predictive Control for path-following problems here for historical context, a bit outdated.
 
