@@ -19,8 +19,13 @@ class VehicleModel:
             0.2965  # front axle (0.1385) - rear axle (-0.158), from buddy.xml
         )
         self.width = 0.16
+        self.safety_margin = 0.15
         self.max_speed = 1.5
         self.max_acc = 1.0
         self.max_d_acc = 1.0
         self.max_steer = 0.38  # ±0.38 rad (±21.8°), from buddy.xml steering joint range
         self.max_d_steer = np.radians(30)
+
+    @property
+    def buffer(self) -> float:
+        return self.width / 2.0 + self.safety_margin

@@ -35,8 +35,7 @@ class MPC:
         self.vehicle: VehicleModel = vehicle
         self.dt: float = DT
         self.control_horizon: int = int(T / DT)
-        # Half-width + safety margin
-        self.vehicle_buffer: float = self.vehicle.width / 2.0 + 0.15
+        self.vehicle_buffer: float = self.vehicle.buffer
 
         self.Q: npt.NDArray[np.float64] = np.diag(state_cost)
         self.Qf: npt.NDArray[np.float64] = np.diag(final_state_cost)
@@ -397,7 +396,7 @@ class MPC:
             )
 
             if self.x.value is None:
-                # the oprimiser failed!
+                # the optimiser failed!
                 # In this case you want to initialise a recovery behaviour!
                 # To make this simple here I just decelerate
                 print("MPC failed -> Emergency braking!")
