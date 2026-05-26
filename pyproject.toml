@@ -15,6 +15,7 @@ dependencies = [
     "scipy",
     "osqp",
     "sympy",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]

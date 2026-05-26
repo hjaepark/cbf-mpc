@@ -10,7 +10,7 @@ import numpy.typing as npt
 
 import mujoco
 import mujoco.viewer
-from cvxpy_mpc import MPC, VehicleModel
+from cvxpy_mpc import MPC
 from cvxpy_mpc.utils import (
     compute_path_from_wp,
     compute_errors,
@@ -22,8 +22,6 @@ from cvxpy_mpc.utils import (
 USE_OBS_AVOIDANCE = True
 
 TARGET_VEL = 1.0
-T = 4.0
-DT = 0.2
 SENSOR_MAX_RANGE = 4.0
 SENSOR_FOV_DEG = 90.0
 
@@ -42,7 +40,6 @@ class SharedData:
         self.is_active: bool = True
         self.mpc_accel: float = 0.0
         self.mpc_steer: float = 0.0
-        self.mpc_base_vel: float = 0.0
 
         # Telemetry & visualization
         self.x_mpc_world: npt.NDArray[np.float64] | None = None
@@ -89,7 +86,7 @@ def controller_loop(
         theta = pred_state[3]
         a = last_control[0]
         delta = last_control[1]
-        L = mpc.vehicle.wheelbase
+        L = mpc.wheelbase
 
         # Integrate physics forward in global space
         pred_state[0] += v * np.cos(theta) * elapsed
@@ -100,7 +97,9 @@ def controller_loop(
         # NOTE: we convert the state in ego frame and we use a ego target
         # so we the optimization problem is a bit easier and we save some solver time
         # Get reference trajectory
-        target = get_ref_trajectory(pred_state, path, TARGET_VEL, T, DT)
+        target = get_ref_trajectory(
+            pred_state, path, TARGET_VEL, mpc.control_horizon * mpc.dt, mpc.dt
+        )
         pred_ego_state = [0.0, 0.0, pred_state[2], 0.0]
 
         # Transform global obstacle to ego frame using the same pred_state
@@ -126,7 +125,6 @@ def controller_loop(
         with shared.lock:
             shared.mpc_accel = control[0]
             shared.mpc_steer = control[1]
-            shared.mpc_base_vel = pred_state[2]
             shared.mpc_elapsed = elapsed
             shared.x_mpc_world = (
                 ego_to_global(pred_state, x_mpc) if x_mpc is not None else None
@@ -134,7 +132,7 @@ def controller_loop(
 
         # Enforce loop frequency
         elapsed_total = time.time() - start_time
-        sleep_time = max(0.0, DT - elapsed_total)
+        sleep_time = max(0.0, mpc.dt - elapsed_total)
         time.sleep(sleep_time)
 
 
@@ -334,22 +332,11 @@ def main() -> None:
         (7.0, -5.5, 0.65),
     ]
 
-    state_cost = final_state_cost = [
-        1.0,
-        50.0,
-        10.0,
-        20.0,
-    ]  # [Along-track, Cross-track, Velocity, Heading]
-    actuation_cost = actuation_rate_cost = [10.0, 10.0]  # [Acceleration, Steer]
-
     mpc = MPC(
-        VehicleModel(),
-        T,
-        DT,
-        state_cost,
-        final_state_cost,
-        actuation_cost,
-        actuation_rate_cost,
+        "config/mpc.yaml",
+        horizon_time=4.0,
+        state_cost=[1.0, 50.0, 10.0, 20.0],
+        final_state_cost=[1.0, 50.0, 10.0, 20.0],
     )
 
     steer_jnt = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, "buddy_steering_wheel")
@@ -410,11 +397,6 @@ def main() -> None:
 
                 elapsed_real_time = time.perf_counter() - sim_start_time
 
-                # Step physics
-                while d.time < elapsed_real_time:
-                    d.ctrl[:] = control
-                    mujoco.mj_step(m, d)
-
                 current_state = get_state(d, bid)
 
                 # External obstacle detection pipeline (global frame)
@@ -437,7 +419,6 @@ def main() -> None:
                     mpc_elapsed = shared.mpc_elapsed
                     mpc_accel = shared.mpc_accel
                     mpc_steer = shared.mpc_steer
-                    mpc_base_vel = shared.mpc_base_vel
                     x_mpc_world = shared.x_mpc_world
 
                 # Log position etc...
@@ -449,9 +430,25 @@ def main() -> None:
                 cte_rmse = np.sqrt(np.mean(np.square(cte_hist)))
                 heading_rmse = np.sqrt(np.mean(np.square(heading_error_hist)))
 
-                # Update Zero-Order Hold control
-                control[0] = mpc_steer
-                control[1] = mpc_base_vel + (mpc_accel * DT)
+                # Step physics
+                while d.time < elapsed_real_time:
+                    # ZERO-ORDER HOLD (ZOH)
+                    # The MPC outputs a target steering angle.
+                    # Since the low-level actuator (aka steering wheel PID) usually
+                    # tracks position directly, we treat this command as a constant step.
+                    # We hold it flat (Zero-Order Hold) across the entire window.
+                    d.ctrl[0] = mpc_steer
+
+                    # FIRST-ORDER HOLD (FOH)
+                    # MuJoCo's wheel actuators expect a velocity command,
+                    # but the MPC outputs an acceleration.
+                    #
+                    # If we applied a raw step jump to velocity (speed+=mpc_acc*DT), it would imply infinite acceleration.
+                    # Instead, we integrate the acceleration command over every microscopic physics step. This smoothly ramps the
+                    # velocity command over time, creating a First-Order Hold that perfectly mimics
+                    # a real motor.
+                    d.ctrl[1] += mpc_accel * m.opt.timestep
+                    mujoco.mj_step(m, d)
 
                 # Update camera position to follow the car
                 viewer.cam.lookat[:] = [current_state[0], current_state[1], 0.0]
