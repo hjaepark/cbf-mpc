@@ -169,28 +169,28 @@ class MPC:
         cd = np.cos(delta)
         td = np.tan(delta)
 
-        A = np.zeros((self.nx, self.nx))
+        A = np.zeros((self._state_dim, self._state_dim))
         A[0, 2] = ct
         A[0, 3] = -v * st
         A[1, 2] = st
         A[1, 3] = v * ct
-        A[3, 2] = v * td / self.vehicle.wheelbase
-        A_lin = np.eye(self.nx) + self.dt * A
+        A[3, 2] = v * td / self.wheelbase
+        A_lin = np.eye(self._state_dim) + self.dt * A
 
-        B = np.zeros((self.nx, self.nu))
+        B = np.zeros((self._state_dim, self._control_dim))
         B[2, 0] = 1
-        B[3, 1] = v / (self.vehicle.wheelbase * cd**2)
+        B[3, 1] = v / (self.wheelbase * cd**2)
         B_lin = self.dt * B
 
-        f_xu = np.array([v * ct, v * st, a, v * td / self.vehicle.wheelbase]).reshape(
-            self.nx, 1
+        f_xu = np.array([v * ct, v * st, a, v * td / self.wheelbase]).reshape(
+            self._state_dim, 1
         )
         C_lin = (
             self.dt
             * (
                 f_xu
-                - np.dot(A, x_bar.reshape(self.nx, 1))
-                - np.dot(B, u_bar.reshape(self.nu, 1))
+                - np.dot(A, x_bar.reshape(self._state_dim, 1))
+                - np.dot(B, u_bar.reshape(self._control_dim, 1))
             ).flatten()
         )
         return A_lin, B_lin, C_lin
