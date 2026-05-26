@@ -129,6 +129,7 @@ class MPC:
         ]
 
         # Reference params (DPP-compliant placeholders)
+        # see https://www.cvxpy.org/tutorial/dpp/index.html
         self._cos_reference = opt.Parameter(self.control_horizon + 1)
         self._sin_reference = opt.Parameter(self.control_horizon + 1)
         self._along_reference = opt.Parameter(self.control_horizon + 1)
@@ -142,6 +143,11 @@ class MPC:
         self._obstacle_safe_distance = opt.Parameter(
             self.control_horizon, name="obs_dist"
         )
+        # In optimization, a "slack" variable is a mathematical fudge factor.
+        # Instead of treating the obstacle as an unyielding concrete wall,
+        # we treat it as a stiff rubber wall. This variable tracks *how much*
+        # we dent the wall if the vehicle is physically forced into it.
+        # This allows in practice to turn the obstacle factor from hard(may cause failures) to soft
         self._obstacle_slack: opt.Variable = opt.Variable(
             self.control_horizon, nonneg=True, name="obstacle_slacks"
         )
@@ -149,6 +155,7 @@ class MPC:
         self._previous_command: npt.NDArray[np.float64] | None = None
         self._previous_trajectory: npt.NDArray[np.float64] | None = None
 
+        # build the problem ONCE
         self._problem: opt.Problem = self._make_mpc_problem()
 
     def _compute_linear_model_matrices(
@@ -348,6 +355,7 @@ class MPC:
         x_ref, y_ref = target[0, :], target[1, :]
         v_ref, theta_ref = target[2, :], target[3, :]
 
+        # Pre-calculate scalar projections using NumPy vectors
         cos_values = np.cos(theta_ref)
         sin_values = np.sin(theta_ref)
         along_projections = cos_values * x_ref + sin_values * y_ref
@@ -402,6 +410,7 @@ class MPC:
                 self._B_params[k].value = B_k
                 self._C_params[k].value = C_k
 
+            # Obstacle half-plane params (based on x_guess at step k+1)
             obstacle_normals_x = np.zeros(self.control_horizon)
             obstacle_normals_y = np.zeros(self.control_horizon)
             obstacle_distances = np.zeros(self.control_horizon)
@@ -417,6 +426,7 @@ class MPC:
                     dy = y_ref[k + 1] - obstacle_y
                     dist = np.hypot(dx, dy)
                     dist = dist if dist > 1e-5 else 1e-5
+                    # [x,y] components of vector n
                     normal_x = dx / dist
                     normal_y = dy / dist
 
