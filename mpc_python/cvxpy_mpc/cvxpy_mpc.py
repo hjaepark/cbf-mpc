@@ -1,46 +1,74 @@
 from __future__ import annotations
 
+import pathlib
+
 import cvxpy as opt
 import numpy as np
 import numpy.typing as npt
-
-from .vehicle_model import VehicleModel
+import yaml
 
 
 class MPC:
     def __init__(
         self,
-        vehicle: VehicleModel,
-        T: float,
-        DT: float,
-        state_cost: list[float],
-        final_state_cost: list[float],
-        input_cost: list[float],
-        input_rate_cost: list[float],
+        config: str | pathlib.Path | dict,
+        T: float | None = None,
+        DT: float | None = None,
+        state_cost: list[float] | None = None,
+        final_state_cost: list[float] | None = None,
+        input_cost: list[float] | None = None,
+        input_rate_cost: list[float] | None = None,
+        slack_penalty: float | None = None,
     ) -> None:
+        if isinstance(config, (str, pathlib.Path)):
+            with open(config) as f:
+                cfg = yaml.safe_load(f)
+        else:
+            cfg = config
+
         self.nx: int = 4
         self.nu: int = 2
 
-        if len(state_cost) != self.nx:
+        self.wheelbase = cfg["model"]["vehicle"]["wheelbase"]
+        self.width = cfg["model"]["vehicle"]["width"]
+        self.safety_margin = cfg["model"]["vehicle"]["safety_margin"]
+        self.max_speed = cfg["model"]["vehicle"]["max_speed"]
+        self.max_acc = cfg["model"]["vehicle"]["max_acc"]
+        self.max_d_acc = cfg["model"]["vehicle"]["max_d_acc"]
+        self.max_steer = cfg["model"]["vehicle"]["max_steer"]
+        self.max_d_steer = cfg["model"]["vehicle"]["max_d_steer"]
+
+        self.dt: float = DT if DT is not None else cfg["controller"]["prediction"]["timestep"]
+        horizon_time = T if T is not None else cfg["controller"]["prediction"]["horizon_time"]
+        self.control_horizon: int = int(horizon_time / self.dt)
+
+        slt = state_cost if state_cost is not None else cfg["controller"]["weights"]["state_cost"]
+        flt = final_state_cost if final_state_cost is not None else cfg["controller"]["weights"]["final_state_cost"]
+        ict = input_cost if input_cost is not None else cfg["controller"]["weights"]["input_cost"]
+        irt = input_rate_cost if input_rate_cost is not None else cfg["controller"]["weights"]["input_rate_cost"]
+
+        if len(slt) != self.nx:
             raise ValueError(f"State Error cost matrix should be of size {self.nx}")
-        if len(final_state_cost) != self.nx:
+        if len(flt) != self.nx:
             raise ValueError(f"End State Error cost matrix should be of size {self.nx}")
-        if len(input_cost) != self.nu:
+        if len(ict) != self.nu:
             raise ValueError(f"Control Effort cost matrix should be of size {self.nu}")
-        if len(input_rate_cost) != self.nu:
+        if len(irt) != self.nu:
             raise ValueError(
                 f"Control Effort Difference cost matrix should be of size {self.nu}"
             )
 
-        self.vehicle: VehicleModel = vehicle
-        self.dt: float = DT
-        self.control_horizon: int = int(T / DT)
-        self.vehicle_buffer: float = self.vehicle.buffer
+        self.Q: npt.NDArray[np.float64] = np.diag(slt)
+        self.Qf: npt.NDArray[np.float64] = np.diag(flt)
+        self.R: npt.NDArray[np.float64] = np.diag(ict)
+        self.Rr: npt.NDArray[np.float64] = np.diag(irt)
 
-        self.Q: npt.NDArray[np.float64] = np.diag(state_cost)
-        self.Qf: npt.NDArray[np.float64] = np.diag(final_state_cost)
-        self.R: npt.NDArray[np.float64] = np.diag(input_cost)
-        self.Rr: npt.NDArray[np.float64] = np.diag(input_rate_cost)
+        self.slack_penalty: float = (
+            slack_penalty if slack_penalty is not None
+            else cfg["controller"]["obstacle"]["slack_penalty"]
+        )
+
+        self.vehicle_buffer: float = self.width / 2.0 + self.safety_margin
 
         # CVXPY vars
         self.x: opt.Variable = opt.Variable(
@@ -123,15 +151,15 @@ class MPC:
         A[0, 3] = -v * st
         A[1, 2] = st
         A[1, 3] = v * ct
-        A[3, 2] = v * td / self.vehicle.wheelbase
+        A[3, 2] = v * td / self.wheelbase
         A_lin = np.eye(self.nx) + self.dt * A
 
         B = np.zeros((self.nx, self.nu))
         B[2, 0] = 1
-        B[3, 1] = v / (self.vehicle.wheelbase * cd**2)
+        B[3, 1] = v / (self.wheelbase * cd**2)
         B_lin = self.dt * B
 
-        f_xu = np.array([v * ct, v * st, a, v * td / self.vehicle.wheelbase]).reshape(
+        f_xu = np.array([v * ct, v * st, a, v * td / self.wheelbase]).reshape(
             self.nx, 1
         )
         C_lin = (
@@ -212,7 +240,7 @@ class MPC:
                 self.obs_n_x[k] * self.x[0, k + 1] + self.obs_n_y[k] * self.x[1, k + 1]
                 >= self.obs_safe_dist[k] - self.slack_obs[k]
             ]
-            cost += 1e5 * self.slack_obs[k]
+            cost += self.slack_penalty * self.slack_obs[k]
 
             # Actuation magnitude cost
             cost += opt.quad_form(self.u[:, k], self.R)
@@ -249,29 +277,29 @@ class MPC:
         constr += [self.x[:, 0] == self.initial_state_param]
 
         # state magnitude
-        constr += [opt.abs(self.x[2, :]) <= self.vehicle.max_speed]
+        constr += [opt.abs(self.x[2, :]) <= self.max_speed]
 
         # control magnitude
-        constr += [opt.abs(self.u[0, :]) <= self.vehicle.max_acc]
-        constr += [opt.abs(self.u[1, :]) <= self.vehicle.max_steer]
+        constr += [opt.abs(self.u[0, :]) <= self.max_acc]
+        constr += [opt.abs(self.u[1, :]) <= self.max_steer]
 
         # Actuation rate of change bounds (step 0 uses last cmd)
         constr += [
             opt.abs(self.u[0, 0] - self.last_cmd_param[0]) / self.dt
-            <= self.vehicle.max_d_acc
+            <= self.max_d_acc
         ]
         constr += [
             opt.abs(self.u[1, 0] - self.last_cmd_param[1]) / self.dt
-            <= self.vehicle.max_d_steer
+            <= self.max_d_steer
         ]
         for k in range(1, self.control_horizon):
             constr += [
                 opt.abs(self.u[0, k] - self.u[0, k - 1]) / self.dt
-                <= self.vehicle.max_d_acc
+                <= self.max_d_acc
             ]
             constr += [
                 opt.abs(self.u[1, k] - self.u[1, k - 1]) / self.dt
-                <= self.vehicle.max_d_steer
+                <= self.max_d_steer
             ]
 
         prob = opt.Problem(opt.Minimize(cost), constr)
@@ -403,7 +431,7 @@ class MPC:
                 emergency_u = np.zeros((self.nu, self.control_horizon))
                 v = initial_state[2]
                 for k in range(self.control_horizon):
-                    a = -self.vehicle.max_acc if v > 0 else 0.0
+                    a = -self.max_acc if v > 0 else 0.0
                     emergency_u[0, k] = a
                     v = max(0.0, v + a * self.dt)
                 self.prev_cmd = np.copy(emergency_u)

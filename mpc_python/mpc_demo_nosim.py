@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Wedge
 import numpy as np
 import numpy.typing as npt
-from cvxpy_mpc import MPC, VehicleModel
+from cvxpy_mpc import MPC
 from cvxpy_mpc.utils import (
     compute_path_from_wp,
     detect_obstacle_camera,
@@ -30,10 +30,7 @@ SIM_START_H = 0.0
 # Params
 USE_OBS_AVOIDANCE = True
 
-# Params
 TARGET_VEL = 1.0  # m/s
-T = 5  # Prediction Horizon [s]
-DT = 0.2  # discretization step [s]
 
 OBS = (
     [
@@ -59,13 +56,8 @@ class MPCSim:
         # helper variable to keep track of mpc output
         self.control: npt.NDArray[np.float64] = np.zeros(2)
 
-        self.K: int = int(T / DT)
-
-        Q = [10, 50, 30, 30]  # state error cost
-        Qf = [10, 50, 30, 30]  # state final error cost
-        R = [10, 10]  # input cost
-        P = [10, 10]  # input rate of change cost
-        self.mpc: MPC = MPC(VehicleModel(), T, DT, Q, Qf, R, P)
+        self.mpc: MPC = MPC("config/mpc.yaml")
+        self.K: int = self.mpc.control_horizon
         self.detected_obs: tuple[float, float, float] | None = None
 
         # Path from waypoint interpolation
@@ -170,10 +162,10 @@ class MPCSim:
         self.ax_accel = plt.subplot(gs[0, 2])
         self.ax_accel.set_ylabel("a(t) [m/ss]")
         self.ax_accel.set_xlabel("t [s]")
-        self.ax_accel.axhline(y=self.mpc.vehicle.max_acc, c="gray", ls="--", lw=0.8)
-        self.ax_accel.axhline(y=-self.mpc.vehicle.max_acc, c="gray", ls="--", lw=0.8)
+        self.ax_accel.axhline(y=self.mpc.max_acc, c="gray", ls="--", lw=0.8)
+        self.ax_accel.axhline(y=-self.mpc.max_acc, c="gray", ls="--", lw=0.8)
         self.ax_accel.set_ylim(
-            -self.mpc.vehicle.max_acc * 1.5, self.mpc.vehicle.max_acc * 1.5
+            -self.mpc.max_acc * 1.5, self.mpc.max_acc * 1.5
         )
         (self.accel_line,) = self.ax_accel.plot([], [], c="tab:orange")
 
@@ -181,7 +173,7 @@ class MPCSim:
         self.ax_steer = plt.subplot(gs[1, 2])
         self.ax_steer.set_ylabel("gamma(t) [deg]")
         self.ax_steer.set_xlabel("t [s]")
-        max_steer_deg = np.degrees(self.mpc.vehicle.max_steer)
+        max_steer_deg = np.degrees(self.mpc.max_steer)
         self.ax_steer.axhline(y=max_steer_deg, c="gray", ls="--", lw=0.8)
         self.ax_steer.axhline(y=-max_steer_deg, c="gray", ls="--", lw=0.8)
         self.ax_steer.set_ylim(-max_steer_deg * 1.5, max_steer_deg * 1.5)
@@ -192,7 +184,7 @@ class MPCSim:
         self.ax_vel.set_ylabel("v(t) [m/s]")
         self.ax_vel.set_xlabel("t [s]")
         self.ax_vel.axhline(y=TARGET_VEL, c="tab:orange", ls="--", label="target speed")
-        self.ax_vel.set_ylim(0, self.mpc.vehicle.max_speed * 1.2)
+        self.ax_vel.set_ylim(0, self.mpc.max_speed * 1.2)
         (self.vel_line,) = self.ax_vel.plot([], [], c="tab:blue", label="vehicle speed")
         self.ax_vel.legend(loc="lower right")
 
@@ -230,7 +222,7 @@ class MPCSim:
                 else:
                     self.detected_obs = None
                 # Get Reference_traj -> inputs are in worldframe
-                target = get_ref_trajectory(self.state, self.path, TARGET_VEL, T, DT)
+                target = get_ref_trajectory(self.state, self.path, TARGET_VEL, self.mpc.control_horizon * self.mpc.dt, self.mpc.dt)
 
                 # dynamycs w.r.t robot frame
                 curr_state = np.array([0, 0, self.state[2], 0])
@@ -262,10 +254,10 @@ class MPCSim:
                 self.optimized_trajectory = ego_to_global(self.state, x_mpc)
 
                 self.state = self.predict_next_state(
-                    self.state, [self.control[0], self.control[1]], DT
+                    self.state, [self.control[0], self.control[1]], self.mpc.dt
                 )
 
-                self.sim_time += DT
+                self.sim_time += self.mpc.dt
                 self.x_history.append(self.state[0])
                 self.y_history.append(self.state[1])
                 self.v_history.append(self.state[2])
@@ -282,7 +274,7 @@ class MPCSim:
         u: npt.NDArray[np.float64] | list[float],
         dt: float,
     ) -> npt.NDArray[np.float64]:
-        L = self.mpc.vehicle.wheelbase
+        L = self.mpc.wheelbase
 
         def kinematics_model(x, t, u):
             dxdt = x[2] * np.cos(x[3])
@@ -345,7 +337,7 @@ class MPCSim:
         )
 
         # Subplot data: plot against time
-        t = np.arange(len(self.a_history)) * DT
+        t = np.arange(len(self.a_history)) * self.mpc.dt
         self.accel_line.set_data(t, self.a_history)
         self.ax_accel.relim()
         self.ax_accel.autoscale_view(scalex=True, scaley=False)
