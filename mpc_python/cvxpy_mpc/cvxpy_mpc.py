@@ -12,301 +12,289 @@ class MPC:
     def __init__(
         self,
         config: str | pathlib.Path | dict,
-        # these are for quick overriding
-        T: float | None = None,
-        DT: float | None = None,
+        horizon_time: float | None = None,
+        timestep: float | None = None,
         state_cost: list[float] | None = None,
         final_state_cost: list[float] | None = None,
         input_cost: list[float] | None = None,
         input_rate_cost: list[float] | None = None,
         slack_penalty: float | None = None,
     ) -> None:
-        # take either a dict or the path yaml dict
         if isinstance(config, (str, pathlib.Path)):
             with open(config) as f:
-                cfg = yaml.safe_load(f)
+                config_data = yaml.safe_load(f)
         else:
-            cfg = config
+            config_data = config
 
-        veh_cfg = cfg["model"]["vehicle"]
-        obs_cfg = cfg["controller"]["obstacle"]
-        pred_cfg = cfg["controller"]["prediction"]
-        weights_cfg = cfg["controller"]["weights"]
+        vehicle_config = config_data["model"]["vehicle"]
+        obstacle_config = config_data["controller"]["obstacle"]
+        prediction_config = config_data["controller"]["prediction"]
+        weights_config = config_data["controller"]["weights"]
 
-        self.nx: int = 4  # State: [Along-track, Cross-track, Velocity, Heading]
-        self.nu: int = 2  # Input: [Acceleration, Steer]
+        self._state_dim: int = 4
+        self._control_dim: int = 2
 
-        self.wheelbase: float = veh_cfg["wheelbase"]
-        self.width: float = veh_cfg["width"]
-        self.max_speed: float = veh_cfg["max_speed"]
-        self.max_acc: float = veh_cfg["max_acc"]
-        self.max_d_acc: float = veh_cfg["max_d_acc"]
-        self.max_steer: float = veh_cfg["max_steer"]
-        self.max_d_steer: float = veh_cfg["max_d_steer"]
+        self.wheelbase: float = vehicle_config["wheelbase"]
+        self.width: float = vehicle_config["width"]
+        self.max_speed: float = vehicle_config["max_speed"]
+        self.max_acc: float = vehicle_config["max_acc"]
+        self.max_d_acc: float = vehicle_config["max_d_acc"]
+        self.max_steer: float = vehicle_config["max_steer"]
+        self.max_d_steer: float = vehicle_config["max_d_steer"]
 
-        # 5. Prediction Horizon (Apply overrides if provided)
-        self.dt: float = DT if DT is not None else pred_cfg["timestep"]
-        horizon_time: float = T if T is not None else pred_cfg["horizon_time"]
-        self.control_horizon: int = int(horizon_time / self.dt)
+        self.dt: float = (
+            timestep if timestep is not None else prediction_config["timestep"]
+        )
+        horizon = (
+            horizon_time
+            if horizon_time is not None
+            else prediction_config["horizon_time"]
+        )
+        self.control_horizon: int = int(horizon / self.dt)
 
-        # 6. Cost Matrices / Weights
-        # Fallback to config if no keyword arguments are passed
-        q_weights = state_cost if state_cost is not None else weights_cfg["state_cost"]
-        qf_weights = (
+        state_cost_weights = (
+            state_cost if state_cost is not None else weights_config["state_cost"]
+        )
+        terminal_cost_weights = (
             final_state_cost
             if final_state_cost is not None
-            else weights_cfg["final_state_cost"]
+            else weights_config["final_state_cost"]
         )
-        r_weights = input_cost if input_cost is not None else weights_cfg["input_cost"]
-        rr_weights = (
+        input_cost_weights = (
+            input_cost if input_cost is not None else weights_config["input_cost"]
+        )
+        input_rate_cost_weights = (
             input_rate_cost
             if input_rate_cost is not None
-            else weights_cfg["input_rate_cost"]
+            else weights_config["input_rate_cost"]
         )
 
-        # Diagonal cost matrices for the solver
-        self.Q: npt.NDArray[np.float64] = np.diag(q_weights)
-        self.Qf: npt.NDArray[np.float64] = np.diag(qf_weights)
-        self.R: npt.NDArray[np.float64] = np.diag(r_weights)
-        self.Rr: npt.NDArray[np.float64] = np.diag(rr_weights)
+        if len(state_cost_weights) != self._state_dim:
+            raise ValueError(
+                f"State Error cost matrix should be of size {self._state_dim}"
+            )
+        if len(terminal_cost_weights) != self._state_dim:
+            raise ValueError(
+                f"End State Error cost matrix should be of size {self._state_dim}"
+            )
+        if len(input_cost_weights) != self._control_dim:
+            raise ValueError(
+                f"Control Effort cost matrix should be of size {self._control_dim}"
+            )
+        if len(input_rate_cost_weights) != self._control_dim:
+            raise ValueError(
+                "Control Effort Difference cost matrix should be of size "
+                f"{self._control_dim}"
+            )
 
-        self.safety_margin: float = obs_cfg["safety_margin"]
-        self.slack_penalty: float = (
-            slack_penalty if slack_penalty is not None else obs_cfg["slack_penalty"]
+        self.q_matrix: npt.NDArray[np.float64] = np.diag(state_cost_weights)
+        self.qf_matrix: npt.NDArray[np.float64] = np.diag(terminal_cost_weights)
+        self.r_matrix: npt.NDArray[np.float64] = np.diag(input_cost_weights)
+        self.rr_matrix: npt.NDArray[np.float64] = np.diag(input_rate_cost_weights)
+
+        self._safety_margin: float = obstacle_config["safety_margin"]
+        self._slack_penalty: float = (
+            slack_penalty
+            if slack_penalty is not None
+            else obstacle_config["slack_penalty"]
         )
 
-        self.vehicle_buffer: float = self.width / 2.0 + self.safety_margin
+        self._vehicle_buffer: float = self.width / 2.0 + self._safety_margin
 
         # CVXPY vars
-        self.x: opt.Variable = opt.Variable(
-            (self.nx, self.control_horizon + 1), name="states"
+        self._states: opt.Variable = opt.Variable(
+            (self._state_dim, self.control_horizon + 1), name="states"
         )
-        self.u: opt.Variable = opt.Variable(
-            (self.nu, self.control_horizon), name="actions"
+        self._controls: opt.Variable = opt.Variable(
+            (self._control_dim, self.control_horizon), name="actions"
         )
 
         # CVXPY params (placeholder for run-time data)
-        # We use params because raw values force CVXPY to re-parse the problem in Python every loop (slow).
-        # Using dedicated Parameters allows CVXPY to lock down the matrix structure at startup.
-        # At runtime, we only update the parameter '.value' (fast).
-        self.initial_state_param: opt.Parameter = opt.Parameter(self.nx, name="x0")
-        self.last_cmd_param: opt.Parameter = opt.Parameter(
-            self.nu, name="last_applied_command"
+        self._initial_state: opt.Parameter = opt.Parameter(self._state_dim, name="x0")
+        self._last_command: opt.Parameter = opt.Parameter(
+            self._control_dim, name="last_applied_command"
         )
 
-        self.A_params: list[opt.Parameter] = [
-            opt.Parameter((self.nx, self.nx), name=f"A_{k}")
+        self._A_params: list[opt.Parameter] = [
+            opt.Parameter((self._state_dim, self._state_dim), name=f"A_{k}")
             for k in range(self.control_horizon)
         ]
-        self.B_params: list[opt.Parameter] = [
-            opt.Parameter((self.nx, self.nu), name=f"B_{k}")
+        self._B_params: list[opt.Parameter] = [
+            opt.Parameter((self._state_dim, self._control_dim), name=f"B_{k}")
             for k in range(self.control_horizon)
         ]
-        self.C_params: list[opt.Parameter] = [
-            opt.Parameter(self.nx, name=f"C_{k}") for k in range(self.control_horizon)
+        self._C_params: list[opt.Parameter] = [
+            opt.Parameter(self._state_dim, name=f"C_{k}")
+            for k in range(self.control_horizon)
         ]
 
-        # TARGET params
-        # done this way to help make the cross-track error Disciplined Parametrized Programming (DPP) compliant...
-        # see https://www.cvxpy.org/tutorial/dpp/index.html
-        self.cos_param = opt.Parameter(self.control_horizon + 1)
-        self.sin_param = opt.Parameter(self.control_horizon + 1)
-        self.p_along_ref_param = opt.Parameter(self.control_horizon + 1)
-        self.p_cross_ref_param = opt.Parameter(self.control_horizon + 1)
-        self.v_ref_param = opt.Parameter(self.control_horizon + 1)
-        self.theta_ref_param = opt.Parameter(self.control_horizon + 1)
+        # Reference params (DPP-compliant placeholders)
+        self._cos_reference = opt.Parameter(self.control_horizon + 1)
+        self._sin_reference = opt.Parameter(self.control_horizon + 1)
+        self._along_reference = opt.Parameter(self.control_horizon + 1)
+        self._cross_reference = opt.Parameter(self.control_horizon + 1)
+        self._velocity_reference = opt.Parameter(self.control_horizon + 1)
+        self._heading_reference = opt.Parameter(self.control_horizon + 1)
 
         # Obstacle params (half-plane linearization)
-        self.obs_n_x = opt.Parameter(self.control_horizon, name="obs_nx")
-        self.obs_n_y = opt.Parameter(self.control_horizon, name="obs_ny")
-        self.obs_safe_dist = opt.Parameter(self.control_horizon, name="obs_dist")
-        # In optimization, a "slack" variable is a mathematical fudge factor.
-        # Instead of treating the obstacle as an unyielding concrete wall,
-        # we treat it as a stiff rubber wall. This variable tracks *how much*
-        # we dent the wall if the vehicle is physically forced into it.
-        # This allows in practice to turn the obstacle factor from hard(may cause failures) to soft
-        self.slack_obs: opt.Variable = opt.Variable(
+        self._obstacle_normal_x = opt.Parameter(self.control_horizon, name="obs_nx")
+        self._obstacle_normal_y = opt.Parameter(self.control_horizon, name="obs_ny")
+        self._obstacle_safe_distance = opt.Parameter(
+            self.control_horizon, name="obs_dist"
+        )
+        self._obstacle_slack: opt.Variable = opt.Variable(
             self.control_horizon, nonneg=True, name="obstacle_slacks"
         )
 
-        # optimised vars
-        self.prev_cmd: npt.NDArray[np.float64] | None = None
-        self.prev_trajectory: npt.NDArray[np.float64] | None = None
+        self._previous_command: npt.NDArray[np.float64] | None = None
+        self._previous_trajectory: npt.NDArray[np.float64] | None = None
 
-        # build the problem ONCE
-        self.prob: opt.Problem = self.make_mpc_problem()
+        self._problem: opt.Problem = self._make_mpc_problem()
 
-    def compute_linear_model_matrices(
-        self, x_bar: npt.NDArray[np.float64], u_bar: npt.NDArray[np.float64]
+    def _compute_linear_model_matrices(
+        self,
+        state_guess: npt.NDArray[np.float64],
+        control_guess: npt.NDArray[np.float64],
     ) -> tuple[
         npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]
     ]:
 
-        v = x_bar[2]
-        theta = x_bar[3]
+        v = state_guess[2]
+        theta = state_guess[3]
 
-        a = u_bar[0]
-        delta = u_bar[1]
+        a = control_guess[0]
+        delta = control_guess[1]
 
-        ct = np.cos(theta)
-        st = np.sin(theta)
-        cd = np.cos(delta)
-        td = np.tan(delta)
+        cos_theta = np.cos(theta)
+        sin_theta = np.sin(theta)
+        cos_delta = np.cos(delta)
+        tan_delta = np.tan(delta)
 
-        A = np.zeros((self.nx, self.nx))
-        A[0, 2] = ct
-        A[0, 3] = -v * st
-        A[1, 2] = st
-        A[1, 3] = v * ct
-        A[3, 2] = v * td / self.wheelbase
-        A_lin = np.eye(self.nx) + self.dt * A
+        jacobian_state = np.zeros((self._state_dim, self._state_dim))
+        jacobian_state[0, 2] = cos_theta
+        jacobian_state[0, 3] = -v * sin_theta
+        jacobian_state[1, 2] = sin_theta
+        jacobian_state[1, 3] = v * cos_theta
+        jacobian_state[3, 2] = v * tan_delta / self.wheelbase
+        discrete_a = np.eye(self._state_dim) + self.dt * jacobian_state
 
-        B = np.zeros((self.nx, self.nu))
-        B[2, 0] = 1
-        B[3, 1] = v / (self.wheelbase * cd**2)
-        B_lin = self.dt * B
+        jacobian_input = np.zeros((self._state_dim, self._control_dim))
+        jacobian_input[2, 0] = 1
+        jacobian_input[3, 1] = v / (self.wheelbase * cos_delta**2)
+        discrete_b = self.dt * jacobian_input
 
-        f_xu = np.array([v * ct, v * st, a, v * td / self.wheelbase]).reshape(
-            self.nx, 1
-        )
-        C_lin = (
+        dynamics = np.array(
+            [v * cos_theta, v * sin_theta, a, v * tan_delta / self.wheelbase]
+        ).reshape(self._state_dim, 1)
+        discrete_c = (
             self.dt
             * (
-                f_xu
-                - np.dot(A, x_bar.reshape(self.nx, 1))
-                - np.dot(B, u_bar.reshape(self.nu, 1))
+                dynamics
+                - np.dot(jacobian_state, state_guess.reshape(self._state_dim, 1))
+                - np.dot(jacobian_input, control_guess.reshape(self._control_dim, 1))
             ).flatten()
         )
-        return A_lin, B_lin, C_lin
+        return discrete_a, discrete_b, discrete_c
 
-    def make_mpc_problem(self) -> opt.Problem:
+    def _make_mpc_problem(self) -> opt.Problem:
 
         cost = 0
-        constr = []
+        constraints = []
 
-        # Tracking error cost
         for k in range(self.control_horizon):
 
-            # Kinematics constrains
-            # Note each step uses the LTV matrix for that step
-            constr += [
-                self.x[:, k + 1]
-                == self.A_params[k] @ self.x[:, k]
-                + self.B_params[k] @ self.u[:, k]
-                + self.C_params[k]
+            constraints += [
+                self._states[:, k + 1]
+                == self._A_params[k] @ self._states[:, k]
+                + self._B_params[k] @ self._controls[:, k]
+                + self._C_params[k]
             ]
 
-            # XY tracking does NOT make much sense in autonomous driving...
-            # Instead we care how much off to the side we are w.r.t the track
-            #
-            # The standard cross-track and along-track errors are calculated by projecting position errors onto the track point
-            # $\theta_{\text{ref}}$:$$e_{\text{along}} = \cos(\theta_{\text{ref}})(x - x_{\text{ref}}) + \sin(\theta_{\text{ref}})(y - y_{\text{ref}})
-            # $e_{\text{cross}} = -\sin(\theta_{\text{ref}})(x - x_{\text{ref}}) + \cos(\theta_{\text{ref}})(y - y_{\text{ref}})$
-            # we expand that and get the following Algebraic problem:
-
-            # Algebraic along-track and cross-track expressions
-            # We will fill the values when the reference is provided, that is why they are params
-            e_along = (
-                self.cos_param[k] * self.x[0, k]
-                + self.sin_param[k] * self.x[1, k]
-                - self.p_along_ref_param[k]
+            along_track_error = (
+                self._cos_reference[k] * self._states[0, k]
+                + self._sin_reference[k] * self._states[1, k]
+                - self._along_reference[k]
             )
-            e_cross = (
-                -self.sin_param[k] * self.x[0, k]
-                + self.cos_param[k] * self.x[1, k]
-                - self.p_cross_ref_param[k]
+            cross_track_error = (
+                -self._sin_reference[k] * self._states[0, k]
+                + self._cos_reference[k] * self._states[1, k]
+                - self._cross_reference[k]
             )
-            e = opt.vstack(
+            error = opt.vstack(
                 [
-                    e_along,
-                    e_cross,
-                    self.x[2, k] - self.v_ref_param[k],
-                    self.x[3, k] - self.theta_ref_param[k],
+                    along_track_error,
+                    cross_track_error,
+                    self._states[2, k] - self._velocity_reference[k],
+                    self._states[3, k] - self._heading_reference[k],
                 ]
             )
-            cost += opt.quad_form(e, self.Q)
+            cost += opt.quad_form(error, self.q_matrix)
 
-            # Obstacle half-plane constraint:
-            # obstacle avoidance: (px - pobs)*2 > R  in non-convex :(
-            # this is linearised as : dot(px - pbos, n) > R
-            # where n is a normal pointing from obstacle center toward the reference trajectory.
-            # so the optimiser knows to stay on the same side of the obstacle as the reference
-            #
-            #      Valid Region
-            #            ^
-            #            | n = (nx, ny)
-            #            * p_ref
-            #            |
-            #    --------+---------- Half-Plane
-            #            | R
-            #            * p_obs
-            #
-            # Hard Constraint:  dot(n, p) >= Safe_Distance
-            # Soft Constraint:  dot(n, p) >= Safe_Distance - Slack
-            constr += [
-                self.obs_n_x[k] * self.x[0, k + 1] + self.obs_n_y[k] * self.x[1, k + 1]
-                >= self.obs_safe_dist[k] - self.slack_obs[k]
+            constraints += [
+                self._obstacle_normal_x[k] * self._states[0, k + 1]
+                + self._obstacle_normal_y[k] * self._states[1, k + 1]
+                >= self._obstacle_safe_distance[k] - self._obstacle_slack[k]
             ]
-            cost += self.slack_penalty * self.slack_obs[k]
+            cost += self._slack_penalty * self._obstacle_slack[k]
 
-            # Actuation magnitude cost
-            cost += opt.quad_form(self.u[:, k], self.R)
+            cost += opt.quad_form(self._controls[:, k], self.r_matrix)
 
-            # Actuation rate cost
             if k == 0:
-                cost += opt.quad_form(self.u[:, 0] - self.last_cmd_param, self.Rr)
+                cost += opt.quad_form(
+                    self._controls[:, 0] - self._last_command, self.rr_matrix
+                )
             else:
-                cost += opt.quad_form(self.u[:, k] - self.u[:, k - 1], self.Rr)
+                cost += opt.quad_form(
+                    self._controls[:, k] - self._controls[:, k - 1], self.rr_matrix
+                )
 
-        # Final point tracking cost
-        e_along_f = (
-            self.cos_param[-1] * self.x[0, -1]
-            + self.sin_param[-1] * self.x[1, -1]
-            - self.p_along_ref_param[-1]
+        terminal_along_track_error = (
+            self._cos_reference[-1] * self._states[0, -1]
+            + self._sin_reference[-1] * self._states[1, -1]
+            - self._along_reference[-1]
         )
-        e_cross_f = (
-            -self.sin_param[-1] * self.x[0, -1]
-            + self.cos_param[-1] * self.x[1, -1]
-            - self.p_cross_ref_param[-1]
+        terminal_cross_track_error = (
+            -self._sin_reference[-1] * self._states[0, -1]
+            + self._cos_reference[-1] * self._states[1, -1]
+            - self._cross_reference[-1]
         )
-
-        e_f = opt.vstack(
+        terminal_error = opt.vstack(
             [
-                e_along_f,
-                e_cross_f,
-                self.x[2, -1] - self.v_ref_param[-1],
-                self.x[3, -1] - self.theta_ref_param[-1],
+                terminal_along_track_error,
+                terminal_cross_track_error,
+                self._states[2, -1] - self._velocity_reference[-1],
+                self._states[3, -1] - self._heading_reference[-1],
             ]
         )
-        cost += opt.quad_form(e_f, self.Qf)
+        cost += opt.quad_form(terminal_error, self.qf_matrix)
 
-        # Initial state
-        constr += [self.x[:, 0] == self.initial_state_param]
+        constraints += [self._states[:, 0] == self._initial_state]
 
-        # state magnitude
-        constr += [opt.abs(self.x[2, :]) <= self.max_speed]
+        constraints += [opt.abs(self._states[2, :]) <= self.max_speed]
 
-        # control magnitude
-        constr += [opt.abs(self.u[0, :]) <= self.max_acc]
-        constr += [opt.abs(self.u[1, :]) <= self.max_steer]
+        constraints += [opt.abs(self._controls[0, :]) <= self.max_acc]
+        constraints += [opt.abs(self._controls[1, :]) <= self.max_steer]
 
-        # Actuation rate of change bounds (step 0 uses last cmd)
-        constr += [
-            opt.abs(self.u[0, 0] - self.last_cmd_param[0]) / self.dt <= self.max_d_acc
+        constraints += [
+            opt.abs(self._controls[0, 0] - self._last_command[0]) / self.dt
+            <= self.max_d_acc
         ]
-        constr += [
-            opt.abs(self.u[1, 0] - self.last_cmd_param[1]) / self.dt <= self.max_d_steer
+        constraints += [
+            opt.abs(self._controls[1, 0] - self._last_command[1]) / self.dt
+            <= self.max_d_steer
         ]
         for k in range(1, self.control_horizon):
-            constr += [
-                opt.abs(self.u[0, k] - self.u[0, k - 1]) / self.dt <= self.max_d_acc
+            constraints += [
+                opt.abs(self._controls[0, k] - self._controls[0, k - 1]) / self.dt
+                <= self.max_d_acc
             ]
-            constr += [
-                opt.abs(self.u[1, k] - self.u[1, k - 1]) / self.dt <= self.max_d_steer
+            constraints += [
+                opt.abs(self._controls[1, k] - self._controls[1, k - 1]) / self.dt
+                <= self.max_d_steer
             ]
 
-        prob = opt.Problem(opt.Minimize(cost), constr)
-        return prob
+        problem = opt.Problem(opt.Minimize(cost), constraints)
+        return problem
 
     def solve(
         self,
@@ -317,106 +305,83 @@ class MPC:
         tolerance: float = 1e-2,
         obstacle: tuple[float, float, float] | None = None,
     ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-        assert len(initial_state) == self.nx
-        assert target.shape == (self.nx, self.control_horizon + 1)
+        assert len(initial_state) == self._state_dim
+        assert target.shape == (self._state_dim, self.control_horizon + 1)
 
-        obs_x, obs_y, obs_r = obstacle if obstacle is not None else (None, None, None)
-
-        self.initial_state_param.value = np.array(initial_state)
-        self.last_cmd_param.value = (
-            self.prev_cmd[:, 0] if self.prev_cmd is not None else np.zeros(self.nu)
+        obstacle_x, obstacle_y, obstacle_radius = (
+            obstacle if obstacle is not None else (None, None, None)
         )
 
-        # Extract references
+        self._initial_state.value = np.array(initial_state)
+        self._last_command.value = (
+            self._previous_command[:, 0]
+            if self._previous_command is not None
+            else np.zeros(self._control_dim)
+        )
+
         x_ref, y_ref = target[0, :], target[1, :]
         v_ref, theta_ref = target[2, :], target[3, :]
 
-        # Pre-calculate scalar projections using NumPy vectors
-        cos_vals = np.cos(theta_ref)
-        sin_vals = np.sin(theta_ref)
-        p_along_vals = cos_vals * x_ref + sin_vals * y_ref
-        p_cross_vals = -sin_vals * x_ref + cos_vals * y_ref
+        cos_values = np.cos(theta_ref)
+        sin_values = np.sin(theta_ref)
+        along_projections = cos_values * x_ref + sin_values * y_ref
+        cross_projections = -sin_values * x_ref + cos_values * y_ref
 
-        # 4. Set values to vector parameters instantly
-        self.cos_param.value = cos_vals
-        self.sin_param.value = sin_vals
-        self.p_along_ref_param.value = p_along_vals
-        self.p_cross_ref_param.value = p_cross_vals
-        self.v_ref_param.value = v_ref
-        self.theta_ref_param.value = theta_ref
+        self._cos_reference.value = cos_values
+        self._sin_reference.value = sin_values
+        self._along_reference.value = along_projections
+        self._cross_reference.value = cross_projections
+        self._velocity_reference.value = v_ref
+        self._heading_reference.value = theta_ref
 
-        # To compute the system matrices for the LTV system, we may initially think to linearize the vehicle's nonlinear kinematics (like sin/cos/tan
-        # steering math) **once** around the current state.
-        # A, B, C = self.compute_linear_model_matrices(initial_state, prev_cmd)
-        # It creates a flat tangent
-        # line and assumes the vehicle physics will behave linearly for the next N steps.
-        # This linear approximation gets more inaccurate as the controller looks at the future
-        # , as the system changes (a lot!) along the trajectory, think sharp turns etc..
-        # You will see the prediction is MUCH less accurate as the horizon grows...
-        #
-        #
-        # In iMPC instead of linearizing once at the start, we make an initial guess of
-        # the entire future trajectory and linearize at *every individual step* along that guessed path.
-        #
-        # After solving the optimization problem, we update the guessed trajectory,
-        # re-linearizing around the new path, we repeat this up to N times.
-        #
-        # Eventually the linear models will converges onto the true, curved, non-linear physics of
-        # the vehicle before a command is ever sent to the actuators.
-
-        # Form the Initial Guess for the iMPC loop
-        if self.prev_trajectory is not None and self.prev_cmd is not None:
-            # Shift previous optimal trajectory left by 1 timestep
-            x_guess = np.roll(self.prev_trajectory, -1, axis=1)
-            x_guess[:, -1] = self.prev_trajectory[:, -1]
-            u_guess = np.roll(self.prev_cmd, -1, axis=1)
-            u_guess[:, -1] = self.prev_cmd[:, -1]
+        if self._previous_trajectory is not None and self._previous_command is not None:
+            x_guess = np.roll(self._previous_trajectory, -1, axis=1)
+            x_guess[:, -1] = self._previous_trajectory[:, -1]
+            control_guess = np.roll(self._previous_command, -1, axis=1)
+            control_guess[:, -1] = self._previous_command[:, -1]
         else:
-            # first iteration guess: pretend the vehicle follows the reference perfectly
             x_guess = target
-            u_guess = np.zeros((self.nu, self.control_horizon))
+            control_guess = np.zeros((self._control_dim, self.control_horizon))
 
-        # The iMPC Optimization Loop
-        for iteration in range(max_iter):
-            # Linearize around our current best guess
+        for _ in range(max_iter):
             for k in range(self.control_horizon):
                 x_bar = x_guess[:, k]
-                u_bar = u_guess[:, k]
+                u_bar = control_guess[:, k]
 
-                A_k, B_k, C_k = self.compute_linear_model_matrices(x_bar, u_bar)
-                self.A_params[k].value = A_k
-                self.B_params[k].value = B_k
-                self.C_params[k].value = C_k
+                A_k, B_k, C_k = self._compute_linear_model_matrices(x_bar, u_bar)
+                self._A_params[k].value = A_k
+                self._B_params[k].value = B_k
+                self._C_params[k].value = C_k
 
-            # Obstacle half-plane params (based on x_guess at step k+1)
-            obs_nx_vals = np.zeros(self.control_horizon)
-            obs_ny_vals = np.zeros(self.control_horizon)
-            obs_dist_vals = np.zeros(self.control_horizon)
+            obstacle_normals_x = np.zeros(self.control_horizon)
+            obstacle_normals_y = np.zeros(self.control_horizon)
+            obstacle_distances = np.zeros(self.control_horizon)
             for k in range(self.control_horizon):
                 if obstacle is None:
-                    # turn this in something trivial for the optimiser
-                    obs_nx_vals[k] = 1.0
-                    obs_ny_vals[k] = 0.0
-                    obs_dist_vals[k] = -1000.0
+                    obstacle_normals_x[k] = 1.0
+                    obstacle_normals_y[k] = 0.0
+                    obstacle_distances[k] = -1000.0
                 else:
-                    # We need a stable point to calculate the normal vector.
-                    dx = x_ref[k + 1] - obs_x
-                    dy = y_ref[k + 1] - obs_y
+                    dx = x_ref[k + 1] - obstacle_x
+                    dy = y_ref[k + 1] - obstacle_y
                     dist = np.hypot(dx, dy)
                     dist = dist if dist > 1e-5 else 1e-5
-                    # [x,y] components of vector n
-                    nx = dx / dist
-                    ny = dy / dist
+                    normal_x = dx / dist
+                    normal_y = dy / dist
 
-                    obs_nx_vals[k] = nx
-                    obs_ny_vals[k] = ny
-                    obs_dist_vals[k] = nx * obs_x + ny * obs_y + obs_r
+                    obstacle_normals_x[k] = normal_x
+                    obstacle_normals_y[k] = normal_y
+                    obstacle_distances[k] = (
+                        normal_x * obstacle_x + normal_y * obstacle_y + obstacle_radius
+                    )
 
-            self.obs_n_x.value = obs_nx_vals
-            self.obs_n_y.value = obs_ny_vals
-            self.obs_safe_dist.value = obs_dist_vals + self.vehicle_buffer
+            self._obstacle_normal_x.value = obstacle_normals_x
+            self._obstacle_normal_y.value = obstacle_normals_y
+            self._obstacle_safe_distance.value = (
+                obstacle_distances + self._vehicle_buffer
+            )
 
-            self.prob.solve(
+            self._problem.solve(
                 solver=opt.CLARABEL,
                 warm_start=True,
                 verbose=verbose,
@@ -424,34 +389,27 @@ class MPC:
                 enforce_dpp=True,
             )
 
-            if self.x.value is None:
-                # the optimiser failed!
-                # In this case you want to initialise a recovery behaviour!
-                # To make this simple here I just decelerate
+            if self._states.value is None:
                 print("MPC failed -> Emergency braking!")
-                emergency_u = np.zeros((self.nu, self.control_horizon))
+                emergency_controls = np.zeros((self._control_dim, self.control_horizon))
                 v = initial_state[2]
                 for k in range(self.control_horizon):
                     a = -self.max_acc if v > 0 else 0.0
-                    emergency_u[0, k] = a
+                    emergency_controls[0, k] = a
                     v = max(0.0, v + a * self.dt)
-                self.prev_cmd = np.copy(emergency_u)
-                return None, self.prev_cmd
+                self._previous_command = np.copy(emergency_controls)
+                return None, self._previous_command
 
-            new_x = np.array(self.x.value)
-            new_u = np.array(self.u.value)
+            new_x = np.array(self._states.value)
+            new_u = np.array(self._controls.value)
 
-            # If the maximum deviation between the old guess and the new solution is tiny,
-            # the non-linear approximations have converged. Success.
             if np.max(np.abs(new_x - x_guess)) < tolerance:
                 break
 
-            # Update the guess for the next iteration
             x_guess = new_x
-            u_guess = new_u
+            control_guess = new_u
 
-        # Store the finalized optimal trajectory for the next control cycle
-        self.prev_trajectory = np.copy(new_x)
-        self.prev_cmd = np.copy(new_u)
+        self._previous_trajectory = np.copy(new_x)
+        self._previous_command = np.copy(new_u)
 
-        return self.prev_trajectory, self.prev_cmd
+        return self._previous_trajectory, self._previous_command

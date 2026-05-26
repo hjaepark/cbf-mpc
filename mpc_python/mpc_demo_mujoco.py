@@ -334,7 +334,7 @@ def main() -> None:
 
     mpc = MPC(
         "config/mpc.yaml",
-        T=4.0,
+        horizon_time=4.0,
         state_cost=[1.0, 50.0, 10.0, 20.0],
         final_state_cost=[1.0, 50.0, 10.0, 20.0],
     )
