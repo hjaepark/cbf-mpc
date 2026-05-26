@@ -40,7 +40,6 @@ class SharedData:
         self.is_active: bool = True
         self.mpc_accel: float = 0.0
         self.mpc_steer: float = 0.0
-        self.mpc_base_vel: float = 0.0
 
         # Telemetry & visualization
         self.x_mpc_world: npt.NDArray[np.float64] | None = None
@@ -98,7 +97,9 @@ def controller_loop(
         # NOTE: we convert the state in ego frame and we use a ego target
         # so we the optimization problem is a bit easier and we save some solver time
         # Get reference trajectory
-        target = get_ref_trajectory(pred_state, path, TARGET_VEL, mpc.control_horizon * mpc.dt, mpc.dt)
+        target = get_ref_trajectory(
+            pred_state, path, TARGET_VEL, mpc.control_horizon * mpc.dt, mpc.dt
+        )
         pred_ego_state = [0.0, 0.0, pred_state[2], 0.0]
 
         # Transform global obstacle to ego frame using the same pred_state
@@ -124,7 +125,6 @@ def controller_loop(
         with shared.lock:
             shared.mpc_accel = control[0]
             shared.mpc_steer = control[1]
-            shared.mpc_base_vel = pred_state[2]
             shared.mpc_elapsed = elapsed
             shared.x_mpc_world = (
                 ego_to_global(pred_state, x_mpc) if x_mpc is not None else None
@@ -397,11 +397,6 @@ def main() -> None:
 
                 elapsed_real_time = time.perf_counter() - sim_start_time
 
-                # Step physics
-                while d.time < elapsed_real_time:
-                    d.ctrl[:] = control
-                    mujoco.mj_step(m, d)
-
                 current_state = get_state(d, bid)
 
                 # External obstacle detection pipeline (global frame)
@@ -424,7 +419,6 @@ def main() -> None:
                     mpc_elapsed = shared.mpc_elapsed
                     mpc_accel = shared.mpc_accel
                     mpc_steer = shared.mpc_steer
-                    mpc_base_vel = shared.mpc_base_vel
                     x_mpc_world = shared.x_mpc_world
 
                 # Log position etc...
@@ -436,9 +430,25 @@ def main() -> None:
                 cte_rmse = np.sqrt(np.mean(np.square(cte_hist)))
                 heading_rmse = np.sqrt(np.mean(np.square(heading_error_hist)))
 
-                # Update Zero-Order Hold control
-                control[0] = mpc_steer
-                control[1] = mpc_base_vel + (mpc_accel * mpc.dt)
+                # Step physics
+                while d.time < elapsed_real_time:
+                    # ZERO-ORDER HOLD (ZOH)
+                    # The MPC outputs a target steering angle.
+                    # Since the low-level actuator (aka steering wheel PID) usually
+                    # tracks position directly, we treat this command as a constant step.
+                    # We hold it flat (Zero-Order Hold) across the entire window.
+                    d.ctrl[0] = mpc_steer
+
+                    # FIRST-ORDER HOLD (FOH)
+                    # MuJoCo's wheel actuators expect a velocity command,
+                    # but the MPC outputs an acceleration.
+                    #
+                    # If we applied a raw step jump to velocity (speed+=mpc_acc*DT), it would imply infinite acceleration.
+                    # Instead, we integrate the acceleration command over every microscopic physics step. This smoothly ramps the
+                    # velocity command over time, creating a First-Order Hold that perfectly mimics
+                    # a real motor.
+                    d.ctrl[1] += mpc_accel * m.opt.timestep
+                    mujoco.mj_step(m, d)
 
                 # Update camera position to follow the car
                 viewer.cam.lookat[:] = [current_state[0], current_state[1], 0.0]
