@@ -12,6 +12,7 @@ class MPC:
     def __init__(
         self,
         config: str | pathlib.Path | dict,
+        # these are for quick overriding
         T: float | None = None,
         DT: float | None = None,
         state_cost: list[float] | None = None,
@@ -20,52 +21,58 @@ class MPC:
         input_rate_cost: list[float] | None = None,
         slack_penalty: float | None = None,
     ) -> None:
+        # take either a dict or the path yaml dict
         if isinstance(config, (str, pathlib.Path)):
             with open(config) as f:
                 cfg = yaml.safe_load(f)
         else:
             cfg = config
 
-        self.nx: int = 4
-        self.nu: int = 2
+        veh_cfg = cfg["model"]["vehicle"]
+        obs_cfg = cfg["controller"]["obstacle"]
+        pred_cfg = cfg["controller"]["prediction"]
+        weights_cfg = cfg["controller"]["weights"]
 
-        self.wheelbase = cfg["model"]["vehicle"]["wheelbase"]
-        self.width = cfg["model"]["vehicle"]["width"]
-        self.safety_margin = cfg["model"]["vehicle"]["safety_margin"]
-        self.max_speed = cfg["model"]["vehicle"]["max_speed"]
-        self.max_acc = cfg["model"]["vehicle"]["max_acc"]
-        self.max_d_acc = cfg["model"]["vehicle"]["max_d_acc"]
-        self.max_steer = cfg["model"]["vehicle"]["max_steer"]
-        self.max_d_steer = cfg["model"]["vehicle"]["max_d_steer"]
+        self.nx: int = 4  # State: [Along-track, Cross-track, Velocity, Heading]
+        self.nu: int = 2  # Input: [Acceleration, Steer]
 
-        self.dt: float = DT if DT is not None else cfg["controller"]["prediction"]["timestep"]
-        horizon_time = T if T is not None else cfg["controller"]["prediction"]["horizon_time"]
+        self.wheelbase: float = veh_cfg["wheelbase"]
+        self.width: float = veh_cfg["width"]
+        self.max_speed: float = veh_cfg["max_speed"]
+        self.max_acc: float = veh_cfg["max_acc"]
+        self.max_d_acc: float = veh_cfg["max_d_acc"]
+        self.max_steer: float = veh_cfg["max_steer"]
+        self.max_d_steer: float = veh_cfg["max_d_steer"]
+
+        # 5. Prediction Horizon (Apply overrides if provided)
+        self.dt: float = DT if DT is not None else pred_cfg["timestep"]
+        horizon_time: float = T if T is not None else pred_cfg["horizon_time"]
         self.control_horizon: int = int(horizon_time / self.dt)
 
-        slt = state_cost if state_cost is not None else cfg["controller"]["weights"]["state_cost"]
-        flt = final_state_cost if final_state_cost is not None else cfg["controller"]["weights"]["final_state_cost"]
-        ict = input_cost if input_cost is not None else cfg["controller"]["weights"]["input_cost"]
-        irt = input_rate_cost if input_rate_cost is not None else cfg["controller"]["weights"]["input_rate_cost"]
+        # 6. Cost Matrices / Weights
+        # Fallback to config if no keyword arguments are passed
+        q_weights = state_cost if state_cost is not None else weights_cfg["state_cost"]
+        qf_weights = (
+            final_state_cost
+            if final_state_cost is not None
+            else weights_cfg["final_state_cost"]
+        )
+        r_weights = input_cost if input_cost is not None else weights_cfg["input_cost"]
+        rr_weights = (
+            input_rate_cost
+            if input_rate_cost is not None
+            else weights_cfg["input_rate_cost"]
+        )
 
-        if len(slt) != self.nx:
-            raise ValueError(f"State Error cost matrix should be of size {self.nx}")
-        if len(flt) != self.nx:
-            raise ValueError(f"End State Error cost matrix should be of size {self.nx}")
-        if len(ict) != self.nu:
-            raise ValueError(f"Control Effort cost matrix should be of size {self.nu}")
-        if len(irt) != self.nu:
-            raise ValueError(
-                f"Control Effort Difference cost matrix should be of size {self.nu}"
-            )
+        # Diagonal cost matrices for the solver
+        self.Q: npt.NDArray[np.float64] = np.diag(q_weights)
+        self.Qf: npt.NDArray[np.float64] = np.diag(qf_weights)
+        self.R: npt.NDArray[np.float64] = np.diag(r_weights)
+        self.Rr: npt.NDArray[np.float64] = np.diag(rr_weights)
 
-        self.Q: npt.NDArray[np.float64] = np.diag(slt)
-        self.Qf: npt.NDArray[np.float64] = np.diag(flt)
-        self.R: npt.NDArray[np.float64] = np.diag(ict)
-        self.Rr: npt.NDArray[np.float64] = np.diag(irt)
-
+        self.safety_margin: float = obs_cfg["safety_margin"]
         self.slack_penalty: float = (
-            slack_penalty if slack_penalty is not None
-            else cfg["controller"]["obstacle"]["slack_penalty"]
+            slack_penalty if slack_penalty is not None else obs_cfg["slack_penalty"]
         )
 
         self.vehicle_buffer: float = self.width / 2.0 + self.safety_margin
@@ -285,21 +292,17 @@ class MPC:
 
         # Actuation rate of change bounds (step 0 uses last cmd)
         constr += [
-            opt.abs(self.u[0, 0] - self.last_cmd_param[0]) / self.dt
-            <= self.max_d_acc
+            opt.abs(self.u[0, 0] - self.last_cmd_param[0]) / self.dt <= self.max_d_acc
         ]
         constr += [
-            opt.abs(self.u[1, 0] - self.last_cmd_param[1]) / self.dt
-            <= self.max_d_steer
+            opt.abs(self.u[1, 0] - self.last_cmd_param[1]) / self.dt <= self.max_d_steer
         ]
         for k in range(1, self.control_horizon):
             constr += [
-                opt.abs(self.u[0, k] - self.u[0, k - 1]) / self.dt
-                <= self.max_d_acc
+                opt.abs(self.u[0, k] - self.u[0, k - 1]) / self.dt <= self.max_d_acc
             ]
             constr += [
-                opt.abs(self.u[1, k] - self.u[1, k - 1]) / self.dt
-                <= self.max_d_steer
+                opt.abs(self.u[1, k] - self.u[1, k - 1]) / self.dt <= self.max_d_steer
             ]
 
         prob = opt.Problem(opt.Minimize(cost), constr)
@@ -407,9 +410,7 @@ class MPC:
 
                     obs_nx_vals[k] = nx
                     obs_ny_vals[k] = ny
-                    obs_dist_vals[k] = (
-                        nx * obs_x + ny * obs_y + obs_r
-                    )
+                    obs_dist_vals[k] = nx * obs_x + ny * obs_y + obs_r
 
             self.obs_n_x.value = obs_nx_vals
             self.obs_n_y.value = obs_ny_vals
