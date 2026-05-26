@@ -24,6 +24,7 @@
           mujoco
           cvxpy
           scipy
+          pyyaml
         ];
 
         # dev packages, add extra stuff here

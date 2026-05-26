@@ -1,0 +1,22 @@
+model:
+  vehicle:
+    wheelbase: 0.2965  # front axle (0.1385) - rear axle (-0.158), from buddy.xml
+    width: 0.16
+    safety_margin: 0.15
+    max_speed: 1.5
+    max_acc: 1.0
+    max_d_acc: 1.0   # m/sss
+    max_steer: 0.38  # ±0.38 rad (±21.8°), from buddy.xml steering joint range
+    max_d_steer: 0.5235987755982988  # np.radians(30)
+
+controller:
+  prediction:
+    horizon_time: 5.0
+    timestep: 0.2
+  weights:
+    state_cost: [10, 50, 30, 30]
+    final_state_cost: [10, 50, 30, 30]
+    input_cost: [10, 10]
+    input_rate_cost: [10, 10]
+  obstacle:
+    slack_penalty: 100000
