@@ -153,48 +153,47 @@ class MPC:
 
     def _compute_linear_model_matrices(
         self,
-        state_guess: npt.NDArray[np.float64],
-        control_guess: npt.NDArray[np.float64],
+        x_bar: npt.NDArray[np.float64],
+        u_bar: npt.NDArray[np.float64],
     ) -> tuple[
         npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]
     ]:
+        v = x_bar[2]
+        theta = x_bar[3]
 
-        v = state_guess[2]
-        theta = state_guess[3]
+        a = u_bar[0]
+        delta = u_bar[1]
 
-        a = control_guess[0]
-        delta = control_guess[1]
+        ct = np.cos(theta)
+        st = np.sin(theta)
+        cd = np.cos(delta)
+        td = np.tan(delta)
 
-        cos_theta = np.cos(theta)
-        sin_theta = np.sin(theta)
-        cos_delta = np.cos(delta)
-        tan_delta = np.tan(delta)
+        A = np.zeros((self.nx, self.nx))
+        A[0, 2] = ct
+        A[0, 3] = -v * st
+        A[1, 2] = st
+        A[1, 3] = v * ct
+        A[3, 2] = v * td / self.vehicle.wheelbase
+        A_lin = np.eye(self.nx) + self.dt * A
 
-        jacobian_state = np.zeros((self._state_dim, self._state_dim))
-        jacobian_state[0, 2] = cos_theta
-        jacobian_state[0, 3] = -v * sin_theta
-        jacobian_state[1, 2] = sin_theta
-        jacobian_state[1, 3] = v * cos_theta
-        jacobian_state[3, 2] = v * tan_delta / self.wheelbase
-        discrete_a = np.eye(self._state_dim) + self.dt * jacobian_state
+        B = np.zeros((self.nx, self.nu))
+        B[2, 0] = 1
+        B[3, 1] = v / (self.vehicle.wheelbase * cd**2)
+        B_lin = self.dt * B
 
-        jacobian_input = np.zeros((self._state_dim, self._control_dim))
-        jacobian_input[2, 0] = 1
-        jacobian_input[3, 1] = v / (self.wheelbase * cos_delta**2)
-        discrete_b = self.dt * jacobian_input
-
-        dynamics = np.array(
-            [v * cos_theta, v * sin_theta, a, v * tan_delta / self.wheelbase]
-        ).reshape(self._state_dim, 1)
-        discrete_c = (
+        f_xu = np.array([v * ct, v * st, a, v * td / self.vehicle.wheelbase]).reshape(
+            self.nx, 1
+        )
+        C_lin = (
             self.dt
             * (
-                dynamics
-                - np.dot(jacobian_state, state_guess.reshape(self._state_dim, 1))
-                - np.dot(jacobian_input, control_guess.reshape(self._control_dim, 1))
+                f_xu
+                - np.dot(A, x_bar.reshape(self.nx, 1))
+                - np.dot(B, u_bar.reshape(self.nu, 1))
             ).flatten()
         )
-        return discrete_a, discrete_b, discrete_c
+        return A_lin, B_lin, C_lin
 
     def _make_mpc_problem(self) -> opt.Problem:
 
@@ -202,14 +201,24 @@ class MPC:
         constraints = []
 
         for k in range(self.control_horizon):
-
+            # Kinematics constrains
+            # Note each step uses the LTV matrix for that step
             constraints += [
                 self._states[:, k + 1]
                 == self._A_params[k] @ self._states[:, k]
                 + self._B_params[k] @ self._controls[:, k]
                 + self._C_params[k]
             ]
+            # XY tracking does NOT make much sense in autonomous driving...
+            # Instead we care how much off to the side we are w.r.t the track
+            #
+            # The standard cross-track and along-track errors are calculated by projecting position errors onto the track point
+            # $\theta_{\text{ref}}$:$$e_{\text{along}} = \cos(\theta_{\text{ref}})(x - x_{\text{ref}}) + \sin(\theta_{\text{ref}})(y - y_{\text{ref}})
+            # $e_{\text{cross}} = -\sin(\theta_{\text{ref}})(x - x_{\text{ref}}) + \cos(\theta_{\text{ref}})(y - y_{\text{ref}})$
+            # we expand that and get the following Algebraic problem:
 
+            # Algebraic along-track and cross-track expressions
+            # We will fill the values when the reference is provided, that is why they are params
             along_track_error = (
                 self._cos_reference[k] * self._states[0, k]
                 + self._sin_reference[k] * self._states[1, k]
@@ -230,6 +239,23 @@ class MPC:
             )
             cost += opt.quad_form(error, self.q_matrix)
 
+            # Obstacle half-plane constraint:
+            # obstacle avoidance: (px - pobs)*2 > R  in non-convex :(
+            # this is linearised as : dot(px - pbos, n) > R
+            # where n is a normal pointing from obstacle center toward the reference trajectory.
+            # so the optimiser knows to stay on the same side of the obstacle as the reference
+            #
+            #      Valid Region
+            #            ^
+            #            | n = (nx, ny)
+            #            * p_ref
+            #            |
+            #    --------+---------- Half-Plane
+            #            | R
+            #            * p_obs
+            #
+            # Hard Constraint:  dot(n, p) >= Safe_Distance
+            # Soft Constraint:  dot(n, p) >= Safe_Distance - Slack
             constraints += [
                 self._obstacle_normal_x[k] * self._states[0, k + 1]
                 + self._obstacle_normal_y[k] * self._states[1, k + 1]
@@ -334,19 +360,42 @@ class MPC:
         self._velocity_reference.value = v_ref
         self._heading_reference.value = theta_ref
 
+        # To compute the system matrices for the LTV system, we may initially think to linearize the vehicle's nonlinear kinematics (like sin/cos/tan
+        # steering math) **once** around the current state.
+        # A, B, C = self.compute_linear_model_matrices(initial_state, prev_cmd)
+        # It creates a flat tangent
+        # line and assumes the vehicle physics will behave linearly for the next N steps.
+        # This linear approximation gets more inaccurate as the controller looks at the future
+        # , as the system changes (a lot!) along the trajectory, think sharp turns etc..
+        # You will see the prediction is MUCH less accurate as the horizon grows...
+        #
+        #
+        # In iMPC instead of linearizing once at the start, we make an initial guess of
+        # the entire future trajectory and linearize at *every individual step* along that guessed path.
+        #
+        # After solving the optimization problem, we update the guessed trajectory,
+        # re-linearizing around the new path, we repeat this up to N times.
+        #
+        # Eventually the linear models will converges onto the true, curved, non-linear physics of
+        # the vehicle before a command is ever sent to the actuators.
+
+        # Form the Initial Guess for the iMPC loop
         if self._previous_trajectory is not None and self._previous_command is not None:
+            # Shift previous optimal trajectory left by 1 timestep
             x_guess = np.roll(self._previous_trajectory, -1, axis=1)
             x_guess[:, -1] = self._previous_trajectory[:, -1]
-            control_guess = np.roll(self._previous_command, -1, axis=1)
-            control_guess[:, -1] = self._previous_command[:, -1]
+            u_guess = np.roll(self._previous_command, -1, axis=1)
+            u_guess[:, -1] = self._previous_command[:, -1]
         else:
+            # first iteration guess: pretend the vehicle follows the reference perfectly
             x_guess = target
-            control_guess = np.zeros((self._control_dim, self.control_horizon))
+            u_guess = np.zeros((self._control_dim, self.control_horizon))
 
+        # The iMPC Optimization Loop
         for _ in range(max_iter):
             for k in range(self.control_horizon):
                 x_bar = x_guess[:, k]
-                u_bar = control_guess[:, k]
+                u_bar = u_guess[:, k]
 
                 A_k, B_k, C_k = self._compute_linear_model_matrices(x_bar, u_bar)
                 self._A_params[k].value = A_k
@@ -358,10 +407,12 @@ class MPC:
             obstacle_distances = np.zeros(self.control_horizon)
             for k in range(self.control_horizon):
                 if obstacle is None:
+                    # turn this in something trivial for the optimiser:warm_start
                     obstacle_normals_x[k] = 1.0
                     obstacle_normals_y[k] = 0.0
                     obstacle_distances[k] = -1000.0
                 else:
+                    # We need a stable point to calculate the normal vector.
                     dx = x_ref[k + 1] - obstacle_x
                     dy = y_ref[k + 1] - obstacle_y
                     dist = np.hypot(dx, dy)
@@ -390,6 +441,9 @@ class MPC:
             )
 
             if self._states.value is None:
+                # the optimiser failed!
+                # In this case you want to initialise a recovery behaviour!
+                # To make this simple here I just decelerate
                 print("MPC failed -> Emergency braking!")
                 emergency_controls = np.zeros((self._control_dim, self.control_horizon))
                 v = initial_state[2]
@@ -403,12 +457,15 @@ class MPC:
             new_x = np.array(self._states.value)
             new_u = np.array(self._controls.value)
 
+            # If the maximum deviation between the old guess and the new solution is tiny,
+            # the non-linear approximations have converged. Success.
             if np.max(np.abs(new_x - x_guess)) < tolerance:
                 break
-
+            # Update the guess for the next iteration
             x_guess = new_x
-            control_guess = new_u
+            u_guess = new_u
 
+        # Store the finalized optimal trajectory for the next control cycle
         self._previous_trajectory = np.copy(new_x)
         self._previous_command = np.copy(new_u)
 
