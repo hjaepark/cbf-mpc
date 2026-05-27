@@ -20,8 +20,6 @@ from cvxpy_mpc.utils import (
     update_path_obstacles,
 )
 
-USE_OBS_AVOIDANCE = True
-
 TARGET_VEL = 1.0
 SENSOR_MAX_RANGE = 4.0
 SENSOR_FOV_DEG = 90.0
@@ -417,7 +415,7 @@ def main() -> None:
                 current_state = get_state(d, bid)
 
                 # External obstacle detection pipeline (global frame)
-                if USE_OBS_AVOIDANCE:
+                if path_obstacles:
                     detected_obs = detect_obstacle_camera(
                         dynamic_obstacle_list,
                         current_state[0],
@@ -477,7 +475,7 @@ def main() -> None:
                 # re-draw markers
                 viewer.user_scn.ngeom = 0
                 draw_path(viewer, path)
-                if USE_OBS_AVOIDANCE:
+                if path_obstacles:
                     draw_obstacle(viewer, dynamic_obstacle_list)
                     draw_sensor_fov(
                         viewer,
@@ -508,7 +506,7 @@ def main() -> None:
                             f"error:  CTE {cte:.3f} m  |  heading {np.degrees(heading_err):.1f} deg\n"
                             f"RMSE:   CTE {cte_rmse:.3f} m  |  heading {heading_rmse:.1f} deg\n"
                             f"goal:   {goal_dist:.2f} m\n"
-                            f"avoid:  {'YES' if detected_obs is not None else 'no' if USE_OBS_AVOIDANCE else 'off'}\n",
+                            f"avoid:  {'YES' if detected_obs is not None else 'no' if path_obstacles else 'off'}\n",
                             "",
                         )
                     ]

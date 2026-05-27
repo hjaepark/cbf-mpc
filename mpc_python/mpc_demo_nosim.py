@@ -28,8 +28,6 @@ SIM_START_V = 0.0
 SIM_START_H = 0.0
 
 
-USE_OBS_AVOIDANCE = True
-
 TARGET_VEL = 1.0  # m/s
 SENSOR_MAX_RANGE = 4.0
 SENSOR_FOV_DEG = 90.0
@@ -100,7 +98,7 @@ class MPCSim:
 
         # Obstacle visualization
         self.obs_circles: list[plt.Circle] = []
-        if USE_OBS_AVOIDANCE:
+        if self.path_obstacles:
             initial_obs = update_path_obstacles(
                 self.path_obstacles, self.path, 0.0
             )
@@ -207,7 +205,7 @@ class MPCSim:
                         plt.pause(0.1)
                     return
                 # External obstacle detection pipeline
-                if USE_OBS_AVOIDANCE:
+                if self.path_obstacles:
                     dynamic_obs = update_path_obstacles(
                         self.path_obstacles, self.path, self.mpc.dt
                     )
@@ -325,7 +323,7 @@ class MPCSim:
             self.ax_main, self.x_history[-1], self.y_history[-1], self.h_history[-1]
         )
 
-        if USE_OBS_AVOIDANCE:
+        if self.path_obstacles:
             current_obs = update_path_obstacles(
                 self.path_obstacles, self.path, 0.0
             )
@@ -348,7 +346,7 @@ class MPCSim:
         avoiding = (
             "YES"
             if self.detected_obs is not None
-            else "no" if USE_OBS_AVOIDANCE else "off"
+            else "no" if self.path_obstacles else "off"
         )
         self.hud.set_text(
             f"v: {self.state[2]:.2f} m/s  |  goal: {goal_dist:.2f} m  |  avoid: {avoiding}  |  MPC: {self.mpc_solve_time*1000:.0f} ms"
