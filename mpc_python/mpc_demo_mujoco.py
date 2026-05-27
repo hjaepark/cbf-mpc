@@ -105,11 +105,17 @@ def controller_loop(
         # Transform global obstacle to ego frame using the same pred_state
         # that the rest of the MPC ego frame is built from
         if global_obs is not None:
-            gx, gy, r = global_obs
+            gx, gy, r, vx, vy = global_obs
             dx = gx - pred_state[0]
             dy = gy - pred_state[1]
             ct, st = np.cos(-pred_state[3]), np.sin(-pred_state[3])
-            pred_obstacle = (dx * ct - dy * st, dy * ct + dx * st, r)
+            pred_obstacle = (
+                dx * ct - dy * st,
+                dy * ct + dx * st,
+                r,
+                vx * ct - vy * st,
+                vy * ct + vx * st,
+            )
         else:
             pred_obstacle = None
 
@@ -209,7 +215,7 @@ def draw_trail(
 
 
 def draw_obstacle(viewer: mujoco.viewer.MjViewer, obstacles) -> None:
-    for idx, (ox, oy, rad) in enumerate(obstacles):
+    for idx, (ox, oy, rad, _, _) in enumerate(obstacles):
         if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
             return
         g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
@@ -331,7 +337,13 @@ def main() -> None:
         (11.5, 2.5, 0.35),
         (7.0, -5.5, 0.65),
     ]
-
+    # Format: [x, y, radius, vx, vy]
+    # Assume these come form your tracker
+    dynamic_obstacle_list = [
+        [7.0, 3.8, 0.375, 0.5, 0.0],  # Moving right at 0.5 m/s
+        [11.5, 2.5, 0.35, -0.2, 0.1],  # Moving diagonally
+        [7.0, -5.5, 0.65, 0.0, -0.3],  # Moving down at 0.3 m/s
+    ]
     mpc = MPC(
         "config/mpc.yaml",
         horizon_time=4.0,
@@ -402,7 +414,7 @@ def main() -> None:
                 # External obstacle detection pipeline (global frame)
                 if USE_OBS_AVOIDANCE:
                     detected_obs = detect_obstacle_camera(
-                        obstacle_list,
+                        dynamic_obstacle_list,
                         current_state[0],
                         current_state[1],
                         current_state[3],
@@ -448,6 +460,10 @@ def main() -> None:
                     # velocity command over time, creating a First-Order Hold that perfectly mimics
                     # a real motor.
                     d.ctrl[1] += mpc_accel * m.opt.timestep
+
+                    for i, obs in enumerate(dynamic_obstacle_list):
+                        obs[0] += obs[3] * m.opt.timestep
+                        obs[1] += obs[4] * m.opt.timestep
                     mujoco.mj_step(m, d)
 
                 # Update camera position to follow the car
@@ -457,7 +473,7 @@ def main() -> None:
                 viewer.user_scn.ngeom = 0
                 draw_path(viewer, path)
                 if USE_OBS_AVOIDANCE:
-                    draw_obstacle(viewer, obstacle_list)
+                    draw_obstacle(viewer, dynamic_obstacle_list)
                     draw_sensor_fov(
                         viewer,
                         current_state[0],

@@ -198,13 +198,13 @@ def detect_obstacle_camera(
     robot_heading: float,
     max_range: float,
     fov_degrees: float = 60.0,
-) -> tuple[float, float, float] | None:
+) -> tuple[float, float, float, float, float] | None:
 
     closest = None
     closest_dist = float("inf")
     fov_rad = np.radians(fov_degrees)
 
-    for obs_x, obs_y, obs_r in obstacles:
+    for obs_x, obs_y, obs_r, obs_vx, obs_vy in obstacles:
         dx = obs_x - robot_x
         dy = obs_y - robot_y
         d = np.hypot(dx, dy)
@@ -231,6 +231,6 @@ def detect_obstacle_camera(
             # We track the closest obstacle by its closest EDGE, not its center
             if dist_to_edge < closest_dist:
                 closest_dist = dist_to_edge
-                closest = (obs_x, obs_y, obs_r)
+                closest = (obs_x, obs_y, obs_r, obs_vx, obs_vy)
 
     return closest
