@@ -17,6 +17,7 @@ from cvxpy_mpc.utils import (
     detect_obstacle_camera,
     ego_to_global,
     get_ref_trajectory,
+    update_path_obstacles,
 )
 from scipy.integrate import odeint
 
@@ -27,20 +28,9 @@ SIM_START_V = 0.0
 SIM_START_H = 0.0
 
 
-# Params
 USE_OBS_AVOIDANCE = True
 
 TARGET_VEL = 1.0  # m/s
-
-OBS = (
-    [
-        (4.0, 2.2, 0.5),
-        (12.5, 0.5, 0.35),
-        (7.0, -5.5, 0.45),
-    ]
-    if USE_OBS_AVOIDANCE
-    else []
-)
 SENSOR_MAX_RANGE = 4.0
 SENSOR_FOV_DEG = 90.0
 
@@ -66,6 +56,12 @@ class MPCSim:
             [0, 0, 2, 4, 3, 3, -1, -2, -6, -2, -2],
             0.05,
         )
+
+        self.path_obstacles = [
+            {"distance": 1.5, "speed": 0.15, "radius": 0.5, "lateral_offset": 0.3},
+            {"distance": 3.5, "speed": 0.25, "radius": 0.35, "lateral_offset": -0.25},
+            {"distance": 5.5, "speed": 0.20, "radius": 0.45, "lateral_offset": 0.35},
+        ]
 
         # Helper variables to keep track of the sim
         self.sim_time: float = 0.0
@@ -105,7 +101,10 @@ class MPCSim:
         # Obstacle visualization
         self.obs_circles: list[plt.Circle] = []
         if USE_OBS_AVOIDANCE:
-            for ox, oy, rad in OBS:
+            initial_obs = update_path_obstacles(
+                self.path_obstacles, self.path, 0.0
+            )
+            for ox, oy, rad, _, _ in initial_obs:
                 c = plt.Circle(
                     (ox, oy),
                     rad,
@@ -164,9 +163,7 @@ class MPCSim:
         self.ax_accel.set_xlabel("t [s]")
         self.ax_accel.axhline(y=self.mpc.max_acc, c="gray", ls="--", lw=0.8)
         self.ax_accel.axhline(y=-self.mpc.max_acc, c="gray", ls="--", lw=0.8)
-        self.ax_accel.set_ylim(
-            -self.mpc.max_acc * 1.5, self.mpc.max_acc * 1.5
-        )
+        self.ax_accel.set_ylim(-self.mpc.max_acc * 1.5, self.mpc.max_acc * 1.5)
         (self.accel_line,) = self.ax_accel.plot([], [], c="tab:orange")
 
         # Steering subplot
@@ -211,8 +208,11 @@ class MPCSim:
                     return
                 # External obstacle detection pipeline
                 if USE_OBS_AVOIDANCE:
+                    dynamic_obs = update_path_obstacles(
+                        self.path_obstacles, self.path, self.mpc.dt
+                    )
                     self.detected_obs = detect_obstacle_camera(
-                        OBS,
+                        dynamic_obs,
                         self.state[0],
                         self.state[1],
                         self.state[3],
@@ -222,18 +222,30 @@ class MPCSim:
                 else:
                     self.detected_obs = None
                 # Get Reference_traj -> inputs are in worldframe
-                target = get_ref_trajectory(self.state, self.path, TARGET_VEL, self.mpc.control_horizon * self.mpc.dt, self.mpc.dt)
+                target = get_ref_trajectory(
+                    self.state,
+                    self.path,
+                    TARGET_VEL,
+                    self.mpc.control_horizon * self.mpc.dt,
+                    self.mpc.dt,
+                )
 
                 # dynamycs w.r.t robot frame
                 curr_state = np.array([0, 0, self.state[2], 0])
 
                 # Transform global obstacle to ego frame
                 if self.detected_obs is not None:
-                    gx, gy, r = self.detected_obs
+                    gx, gy, r, vx, vy = self.detected_obs
                     dx = gx - self.state[0]
                     dy = gy - self.state[1]
                     ct, st = np.cos(-self.state[3]), np.sin(-self.state[3])
-                    obs_ego = (dx * ct - dy * st, dy * ct + dx * st, r)
+                    obs_ego = (
+                        dx * ct - dy * st,
+                        dy * ct + dx * st,
+                        r,
+                        vx * ct - vy * st,
+                        vy * ct + vx * st,
+                    )
                 else:
                     obs_ego = None
 
@@ -313,8 +325,14 @@ class MPCSim:
             self.ax_main, self.x_history[-1], self.y_history[-1], self.h_history[-1]
         )
 
-        # Sensor FOV wedge
         if USE_OBS_AVOIDANCE:
+            current_obs = update_path_obstacles(
+                self.path_obstacles, self.path, 0.0
+            )
+            for i, (ox, oy, _, _, _) in enumerate(current_obs):
+                self.obs_circles[i].set_center((ox, oy))
+
+            # Sensor FOV wedge
             half_fov = SENSOR_FOV_DEG / 2
             theta1 = np.degrees(self.h_history[-1]) - half_fov
             theta2 = np.degrees(self.h_history[-1]) + half_fov

@@ -151,6 +151,62 @@ def ego_to_global(
     return traj
 
 
+def compute_path_arc_lengths(
+    path: npt.NDArray[np.float64],
+) -> tuple[npt.NDArray[np.float64], float]:
+    """Compute cumulative arc-length along a (3,N) path."""
+    cdist = np.zeros(path.shape[1])
+    cdist[1:] = np.cumsum(np.hypot(np.diff(path[0]), np.diff(path[1])))
+    return cdist, cdist[-1]
+
+
+def update_path_obstacles(
+    obstacles: list[dict],
+    path: npt.NDArray[np.float64],
+    dt: float,
+) -> list[list[float]]:
+    """Advance path-following obstacles and return [x, y, radius, vx, vy] list.
+
+    Each obstacle dict: {"distance": float, "speed": float, "radius": float}
+    Obstacles wrap around at the path end.
+    """
+    cdist = np.zeros(path.shape[1])
+    cdist[1:] = np.cumsum(np.hypot(np.diff(path[0]), np.diff(path[1])))
+    total_length = cdist[-1]
+    result = []
+    for obs in obstacles:
+        obs["distance"] += obs["speed"] * dt
+        if obs["distance"] > total_length:
+            obs["distance"] -= total_length
+        elif obs["distance"] < 0.0:
+            obs["distance"] += total_length
+
+        x = np.interp(obs["distance"], cdist, path[0])
+        y = np.interp(obs["distance"], cdist, path[1])
+
+        idx = max(0, min(
+            np.searchsorted(cdist, obs["distance"]) - 1,
+            path.shape[1] - 2,
+        ))
+        seg_dx = path[0, idx + 1] - path[0, idx]
+        seg_dy = path[1, idx + 1] - path[1, idx]
+        seg_len = np.hypot(seg_dx, seg_dy)
+        if seg_len > 1e-6:
+            tx = seg_dx / seg_len
+            ty = seg_dy / seg_len
+            vx = tx * obs["speed"]
+            vy = ty * obs["speed"]
+            lateral = obs.get("lateral_offset", 0.0)
+            if lateral != 0.0:
+                x += -ty * lateral
+                y +=  tx * lateral
+        else:
+            vx, vy = 0.0, 0.0
+
+        result.append([x, y, obs["radius"], vx, vy])
+    return result
+
+
 def compute_errors(
     current_state: npt.NDArray[np.float64], path: npt.NDArray[np.float64]
 ) -> tuple[float, float]:

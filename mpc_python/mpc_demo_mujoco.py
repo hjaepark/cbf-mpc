@@ -17,6 +17,7 @@ from cvxpy_mpc.utils import (
     detect_obstacle_camera,
     ego_to_global,
     get_ref_trajectory,
+    update_path_obstacles,
 )
 
 USE_OBS_AVOIDANCE = True
@@ -331,14 +332,18 @@ def main() -> None:
         0.05,
     )
 
-    # only used when USE_OBS_AVOIDANCE
-    # Format: [x, y, radius, vx, vy]
-    # Assume these come form your tracker
-    dynamic_obstacle_list = [
-        [7.0, 3.8, 0.4, 0.05, 0.0],
-        [11.5, 2.5, 0.35, 0.1, -0.1],
-        [7.0, -5.5, 0.65, 0.05, -0.2],
+    # NOTE: avoid 0.0 lateral offset.
+    # The half-plane approximation issue: obstacle center on the reference path centerline breaks the normals.
+    path_obstacles = [
+        {"distance": 1.5, "speed": 0.15, "radius": 0.4, "lateral_offset": 0.3},
+        {"distance": 3.5, "speed": 0.25, "radius": 0.3, "lateral_offset": -0.25},
+        {"distance": 5.5, "speed": 0.20, "radius": 0.5, "lateral_offset": 0.35},
     ]
+    # move the obstacles along the path and computes the x and y velocity
+    # [x,y,r,vx,vy] just as they would come out from a tracker
+    dynamic_obstacle_list = update_path_obstacles(
+        path_obstacles, path, 0.0
+    )
     mpc = MPC(
         "config/mpc.yaml",
         horizon_time=4.0,
@@ -461,9 +466,9 @@ def main() -> None:
                     # a real motor.
                     d.ctrl[1] += mpc_accel * m.opt.timestep
 
-                    for i, obs in enumerate(dynamic_obstacle_list):
-                        obs[0] += obs[3] * m.opt.timestep
-                        obs[1] += obs[4] * m.opt.timestep
+                    dynamic_obstacle_list[:] = update_path_obstacles(
+                        path_obstacles, path, m.opt.timestep
+                    )
                     mujoco.mj_step(m, d)
 
                 # Update camera position to follow the car
