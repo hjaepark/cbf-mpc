@@ -332,17 +332,12 @@ def main() -> None:
     )
 
     # only used when USE_OBS_AVOIDANCE
-    obstacle_list = [
-        (7.0, 3.8, 0.375),
-        (11.5, 2.5, 0.35),
-        (7.0, -5.5, 0.65),
-    ]
     # Format: [x, y, radius, vx, vy]
     # Assume these come form your tracker
     dynamic_obstacle_list = [
-        [7.0, 3.8, 0.375, 0.5, 0.0],  # Moving right at 0.5 m/s
-        [11.5, 2.5, 0.35, -0.2, 0.1],  # Moving diagonally
-        [7.0, -5.5, 0.65, 0.0, -0.3],  # Moving down at 0.3 m/s
+        [7.0, 3.8, 0.4, 0.05, 0.0],
+        [11.5, 2.5, 0.35, 0.1, -0.1],
+        [7.0, -5.5, 0.65, 0.05, -0.2],
     ]
     mpc = MPC(
         "config/mpc.yaml",
@@ -359,7 +354,13 @@ def main() -> None:
         target=controller_loop, args=(mpc, path, shared), daemon=True
     )
 
-    signal.signal(signal.SIGINT, signal.default_int_handler)
+    # handle CTRL-C for the mpc thread
+    shutdown_flag = threading.Event()
+
+    def handle_shutdown(signum, frame):
+        shutdown_flag.set()
+
+    signal.signal(signal.SIGINT, handle_shutdown)
 
     with mujoco.viewer.launch_passive(m, d) as viewer:
         viewer.cam.lookat[:] = [0.0, 0.0, 0.0]
@@ -370,7 +371,6 @@ def main() -> None:
         fps = 60.0
         render_dt = 1.0 / fps
 
-        control = [0.0, 0.0]  # steer and speed
         x_hist = []
         y_hist = []
         cte_hist = []
@@ -383,7 +383,7 @@ def main() -> None:
 
         try:
 
-            while viewer.is_running():
+            while viewer.is_running() and not shutdown_flag.is_set():
 
                 # Check for completion
                 if shared.goal_reached:
@@ -443,7 +443,7 @@ def main() -> None:
                 heading_rmse = np.sqrt(np.mean(np.square(heading_error_hist)))
 
                 # Step physics
-                while d.time < elapsed_real_time:
+                while d.time < elapsed_real_time and not shutdown_flag.is_set():
                     # ZERO-ORDER HOLD (ZOH)
                     # The MPC outputs a target steering angle.
                     # Since the low-level actuator (aka steering wheel PID) usually
@@ -516,13 +516,15 @@ def main() -> None:
                 )
                 if time_until_next_frame > 0:
                     time.sleep(time_until_next_frame)
-
-        except KeyboardInterrupt:
-            print("\nInterrupted by user (CTRL-C). Shutting down...")
+        except Exception as e:
+            print(e)
 
         finally:
-            with shared.lock:
-                shared.is_active = False
+            shared.is_active = False
+            mpc_thread.join(timeout=1.0)
+            if mpc_thread.is_alive():
+                print("MPC thread is still alive...")
+
             viewer.clear_texts()
 
 
