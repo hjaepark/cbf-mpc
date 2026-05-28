@@ -208,6 +208,10 @@ def update_path_obstacles(
 def compute_errors(
     current_state: npt.NDArray[np.float64], path: npt.NDArray[np.float64]
 ) -> tuple[float, float]:
+    """Compute signed cross-track error and heading error.
+
+    Signed_cte is positive if vehicle is to the left.
+    """
     assert path.shape[1] >= 2, "path must have at least 2 points"
     # Find the closest waypoint index
     dx = current_state[0] - path[0, :]
@@ -217,11 +221,15 @@ def compute_errors(
 
     # Determine segment direction for true cross-track projection
     # If we are at the very last point, look backward, otherwise look forward
-    idx_next = idx - 1 if idx == path.shape[1] - 1 else idx + 1
-
-    # Segment vector (tangent of the track)
-    tx = path[0, idx_next] - path[0, idx]
-    ty = path[1, idx_next] - path[1, idx]
+    if idx == path.shape[1] - 1:
+        idx_start = idx - 1
+        idx_end = idx
+    else:
+        idx_start = idx
+        idx_end = idx + 1
+    # Calculate forward-facing tangent vector
+    tx = path[0, idx_end] - path[0, idx_start]
+    ty = path[1, idx_end] - path[1, idx_start]
     seg_len = np.hypot(tx, ty)
 
     if seg_len > 1e-5:
@@ -234,12 +242,12 @@ def compute_errors(
         vy = current_state[1] - path[1, idx]
 
         # True Cross-Track Error is the perpendicular scalar projection (Using 2D Cross Product)
-        cte = np.abs(vx * ty - vy * tx)
+        cte = (vy * tx) - (vx * ty)
     else:
         cte = distances[idx]
 
     # Heading Error (Normalized between -pi and pi)
-    target_heading = path[2, idx]
+    target_heading = path[2, idx_start]
     heading_err = (current_state[3] - target_heading + np.pi) % (2.0 * np.pi) - np.pi
 
     return (cte, heading_err)
