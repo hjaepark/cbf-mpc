@@ -333,15 +333,13 @@ def main() -> None:
     # NOTE: avoid 0.0 lateral offset.
     # The half-plane approximation issue: obstacle center on the reference path centerline breaks the normals.
     path_obstacles = [
-        {"distance": 1.5, "speed": 0.15, "radius": 0.4, "lateral_offset": 0.3},
-        {"distance": 3.5, "speed": 0.25, "radius": 0.3, "lateral_offset": -0.25},
-        {"distance": 5.5, "speed": 0.20, "radius": 0.5, "lateral_offset": 0.35},
+        {"distance": 3.0, "speed": 0.1, "radius": 0.4, "lateral_offset": 0.3},
+        {"distance": 5.5, "speed": 0.25, "radius": 0.3, "lateral_offset": -0.25},
+        {"distance": 8.5, "speed": 0.20, "radius": 0.5, "lateral_offset": 0.35},
     ]
     # move the obstacles along the path and computes the x and y velocity
     # [x,y,r,vx,vy] just as they would come out from a tracker
-    dynamic_obstacle_list = update_path_obstacles(
-        path_obstacles, path, 0.0
-    )
+    dynamic_obstacle_list = update_path_obstacles(path_obstacles, path, 0.0)
     mpc = MPC(
         "config/mpc.yaml",
         horizon_time=4.0,

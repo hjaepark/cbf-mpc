@@ -93,7 +93,7 @@ def get_ref_trajectory(
     """
     K = int(T / DT)
 
-    # FIX 1: Allocate K + 1 elements to map exactly from k=0 (initial) to k=K (terminal)
+    # Allocate K + 1 elements to map exactly from k=0 (initial) to k=K (terminal)
     xref = np.zeros((4, K + 1))
     ind = get_nn_idx(state, path)
 
@@ -105,7 +105,7 @@ def get_ref_trajectory(
 
     start_dist = cdist[ind]
 
-    # FIX 2: Change range from (1, K + 1) to (0, K + 1) to include the t=0 starting node
+    # range is (0, K + 1) to include the t=0 starting node
     interp_points = [d * DT * target_v + start_dist for d in range(0, K + 1)]
 
     # Compute interpolation (automatically maps across all K + 1 points)
@@ -170,24 +170,22 @@ def update_path_obstacles(
     Each obstacle dict: {"distance": float, "speed": float, "radius": float}
     Obstacles wrap around at the path end.
     """
-    cdist = np.zeros(path.shape[1])
-    cdist[1:] = np.cumsum(np.hypot(np.diff(path[0]), np.diff(path[1])))
-    total_length = cdist[-1]
+    # ideally this should only be precomputed once
+    cdist, total_length = compute_path_arc_lengths(path)
+
     result = []
     for obs in obstacles:
-        obs["distance"] += obs["speed"] * dt
-        if obs["distance"] > total_length:
-            obs["distance"] -= total_length
-        elif obs["distance"] < 0.0:
-            obs["distance"] += total_length
-
+        obs["distance"] = (obs["distance"] + obs["speed"] * dt) % total_length
         x = np.interp(obs["distance"], cdist, path[0])
         y = np.interp(obs["distance"], cdist, path[1])
 
-        idx = max(0, min(
-            np.searchsorted(cdist, obs["distance"]) - 1,
-            path.shape[1] - 2,
-        ))
+        idx = max(
+            0,
+            min(
+                np.searchsorted(cdist, obs["distance"]) - 1,
+                path.shape[1] - 2,
+            ),
+        )
         seg_dx = path[0, idx + 1] - path[0, idx]
         seg_dy = path[1, idx + 1] - path[1, idx]
         seg_len = np.hypot(seg_dx, seg_dy)
@@ -199,7 +197,7 @@ def update_path_obstacles(
             lateral = obs.get("lateral_offset", 0.0)
             if lateral != 0.0:
                 x += -ty * lateral
-                y +=  tx * lateral
+                y += tx * lateral
         else:
             vx, vy = 0.0, 0.0
 
@@ -211,13 +209,13 @@ def compute_errors(
     current_state: npt.NDArray[np.float64], path: npt.NDArray[np.float64]
 ) -> tuple[float, float]:
     assert path.shape[1] >= 2, "path must have at least 2 points"
-    # 1. Find the closest waypoint index
+    # Find the closest waypoint index
     dx = current_state[0] - path[0, :]
     dy = current_state[1] - path[1, :]
     distances = np.hypot(dx, dy)
     idx = np.argmin(distances)
 
-    # 2. Determine segment direction for true cross-track projection
+    # Determine segment direction for true cross-track projection
     # If we are at the very last point, look backward, otherwise look forward
     idx_next = idx - 1 if idx == path.shape[1] - 1 else idx + 1
 
@@ -240,7 +238,7 @@ def compute_errors(
     else:
         cte = distances[idx]
 
-    # 3. Heading Error (Normalized between -pi and pi)
+    # Heading Error (Normalized between -pi and pi)
     target_heading = path[2, idx]
     heading_err = (current_state[3] - target_heading + np.pi) % (2.0 * np.pi) - np.pi
 
