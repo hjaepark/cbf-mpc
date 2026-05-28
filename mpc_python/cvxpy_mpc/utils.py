@@ -254,7 +254,7 @@ def compute_errors(
 
 
 def detect_obstacle_camera(
-    obstacles: list[tuple[float, float, float]],
+    obstacles: list[tuple[float, float, float, float, float]],
     robot_x: float,
     robot_y: float,
     robot_heading: float,
@@ -265,8 +265,9 @@ def detect_obstacle_camera(
     closest = None
     closest_dist = float("inf")
     fov_rad = np.radians(fov_degrees)
+    for obs in obstacles:
+        obs_x, obs_y, obs_r, obs_vx, obs_vy = obs
 
-    for obs_x, obs_y, obs_r, obs_vx, obs_vy in obstacles:
         dx = obs_x - robot_x
         dy = obs_y - robot_y
         d = np.hypot(dx, dy)
@@ -276,16 +277,10 @@ def detect_obstacle_camera(
         if dist_to_edge > max_range:
             continue
 
-        ct = np.cos(-robot_heading)
-        st = np.sin(-robot_heading)
-        ego_x = dx * ct - dy * st
-        ego_y = dy * ct + dx * st
-        angle_to_obs_center = abs(np.arctan2(ego_y, ego_x))
-
-        if d > 0:
-            angular_radius = np.arcsin(min(1.0, obs_r / d))
-        else:
-            angular_radius = np.pi
+        # Normalize the relative angle to [-pi, pi]
+        rel_angle = (np.arctan2(dy, dx) - robot_heading + np.pi) % (2.0 * np.pi) - np.pi
+        angle_to_obs_center = abs(rel_angle)
+        angular_radius = np.arcsin(obs_r / d)
 
         # Check if the closest edge of the obstacle falls within half the FOV
         if (angle_to_obs_center - angular_radius) <= (fov_rad / 2.0):
@@ -293,6 +288,6 @@ def detect_obstacle_camera(
             # We track the closest obstacle by its closest EDGE, not its center
             if dist_to_edge < closest_dist:
                 closest_dist = dist_to_edge
-                closest = (obs_x, obs_y, obs_r, obs_vx, obs_vy)
+                closest = obs
 
     return closest
