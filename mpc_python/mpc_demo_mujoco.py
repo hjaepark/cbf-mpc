@@ -337,11 +337,16 @@ def main() -> None:
         {"distance": 5.5, "speed": 0.25, "radius": 0.3, "lateral_offset": -0.25},
         {"distance": 8.5, "speed": 0.20, "radius": 0.5, "lateral_offset": 0.35},
     ]
+
+    # NOTE:empty list to disable obstacles and remove viz
+    # path_obstacles = []
+
     # move the obstacles along the path and computes the x and y velocity
-    # [x,y,r,vx,vy] just as they would come out from a tracker
+    # [x,y,r,vx,vy] just as they would come out from a tracker (e.g. ekf estimate)
     dynamic_obstacle_list = update_path_obstacles(path_obstacles, path, 0.0)
     mpc = MPC(
         "config/mpc.yaml",
+        # overriedes the default yaml
         horizon_time=4.0,
         state_cost=[1.0, 50.0, 10.0, 20.0],
         final_state_cost=[1.0, 50.0, 10.0, 20.0],

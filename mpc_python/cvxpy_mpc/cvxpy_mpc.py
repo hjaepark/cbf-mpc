@@ -428,6 +428,8 @@ class MPC:
                     obstacle_distances[k] = -1000.0
                 else:
                     # We need a stable point to calculate the normal vector.
+                    # Also we use the current belief of the obstacle moving velocity
+                    # to predict where its position will be at each k of th horizon
                     dx = x_ref[k + 1] - obstacle_x - obstacle_velocity_x * k * self.dt
                     dy = y_ref[k + 1] - obstacle_y - obstacle_velocity_y * k * self.dt
 
