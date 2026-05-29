@@ -21,9 +21,14 @@ class MPC:
         slack_penalty: float | None = None,
     ) -> None:
         if isinstance(config, (str, pathlib.Path)):
-            with open(config) as f:
+            # resolve path
+            path = pathlib.Path(config)
+            if not path.is_absolute():
+                path = pathlib.Path(__file__).parent.parent / config
+            with open(path) as f:
                 config_data = yaml.safe_load(f)
         else:
+            # raw dict
             config_data = config
 
         vehicle_config = config_data["model"]["vehicle"]

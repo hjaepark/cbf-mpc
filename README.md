@@ -39,7 +39,8 @@ Here is a brief overview of the codebase:
 ```
  mpc_python
 ├──  config
-│   └──  mpc.yaml # the configuration of the MPC. Start here!
+│   ├──  mpc.yaml # the configuration of the MPC. Start here!
+│   └──  simulation.yaml # common configuration of the demos
 └──  mpc_python
    ├──  cvxpy_mpc
    │   ├──  cvxpy_mpc.py # main mpc implementation
