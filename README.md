@@ -9,7 +9,13 @@ A (hopefully) easy-to-follow  Iterative MPC tracking controller built with CVXPY
 
 This mainly uses **[CVXPY](https://www.cvxpy.org/)** to maintain a strict quadratic programming framework rather than relying on a non-linear solver like CasADi (which I love btw!). But, implementing an iMPC, we can still bridge the gap between convex optimization and real-world vehicle physics, allowing you to handle non-linear kinematics through iterative linearization.
 
+Note: I've also preserved my original notebooks on Model Predictive Control for path-following problems here for historical context, a bit outdated.
+
+This repo builds upon code and ideas from other open-source projects; please check them out in the Special Thanks section!
+
 ## Showcase
+
+You can run the demo with MuJoCo and the mushr car or just python with no physics simulation:
 
 <table>
   <tr>
@@ -26,11 +32,25 @@ This mainly uses **[CVXPY](https://www.cvxpy.org/)** to maintain a strict quadra
   </tr>
 </table>
 
-Note: I've also preserved my original notebooks on Model Predictive Control for path-following problems here for historical context, a bit outdated.
-
-This repo builds upon code and ideas from other open-source projects; please check them out in the Special Thanks section!
-
 ## Getting started
+
+Here is a brief overview of the codebase:
+
+```
+ mpc_python
+├──  config
+│   └──  mpc.yaml # the configuration of the MPC. Start here!
+└──  mpc_python
+   ├──  cvxpy_mpc
+   │   ├──  cvxpy_mpc.py # main mpc implementation
+   │   └──  utils.py
+   ├──  models
+   │   └──  mushr # model from prl-mushr/mushr_mujoco_ros
+   ├──  mpc_demo_mujoco.py # mujoco demo entry point
+   └──  mpc_demo_nosim.py  # no physics demo entry point
+```
+
+There are a few ways to run this:
 
 ### Nix Flake ❄️
 
