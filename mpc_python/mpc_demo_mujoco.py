@@ -20,9 +20,7 @@ from cvxpy_mpc.utils import (
     update_path_obstacles,
 )
 
-TARGET_VEL = 1.0
-SENSOR_MAX_RANGE = 4.0
-SENSOR_FOV_DEG = 90.0
+import yaml
 
 
 # MPC and sim are on 2 threads
@@ -49,7 +47,11 @@ class SharedData:
 
 
 def controller_loop(
-    mpc: MPC, path: npt.NDArray[np.float64], shared: SharedData
+    mpc: MPC,
+    path: npt.NDArray[np.float64],
+    shared: SharedData,
+    goal_threshold: float,
+    target_speed: float,
 ) -> None:
 
     while True:
@@ -71,7 +73,7 @@ def controller_loop(
             (current_state[0] - path[0, -1]) ** 2
             + (current_state[1] - path[1, -1]) ** 2
         )
-        if goal_dist < 0.2:
+        if goal_dist < goal_threshold:
             with shared.lock:
                 shared.goal_reached = True
             break
@@ -97,7 +99,7 @@ def controller_loop(
         # so we the optimization problem is a bit easier and we save some solver time
         # Get reference trajectory
         target = get_ref_trajectory(
-            pred_state, path, TARGET_VEL, mpc.control_horizon * mpc.dt, mpc.dt
+            pred_state, path, target_speed, mpc.control_horizon * mpc.dt, mpc.dt
         )
         pred_ego_state = [0.0, 0.0, pred_state[2], 0.0]
 
@@ -321,25 +323,25 @@ def main() -> None:
     d = mujoco.MjData(m)
     bid = body_id(m, "buddy")
 
-    d.qpos[:4] = [0.0, 0.3, 0.1, 1.0]
+    sim_config = yaml.safe_load(
+        (pathlib.Path(__file__).parent / "config" / "simulation.yaml").read_text()
+    )
+    start = sim_config["start"]
+    target_speed = sim_config["target_speed"]
+    sensor_max_range = sim_config["sensor"]["max_range"]
+    sensor_fov_deg = sim_config["sensor"]["fov_deg"]
+    goal_threshold = sim_config["goal_threshold"]
+
+    d.qpos[:4] = [start["x"], start["y"], 0.1, 1.0]
     mujoco.mj_forward(m, d)
 
     path = compute_path_from_wp(
-        [0, 3, 4, 6, 10, 11, 12, 6, 1, 0],
-        [0, 0, 2, 4, 3, 3, -1, -6, -2, -2],
-        0.05,
+        sim_config["path"]["waypoints_x"],
+        sim_config["path"]["waypoints_y"],
+        sim_config["path"]["interpolation_step"],
     )
 
-    # NOTE: avoid 0.0 lateral offset.
-    # The half-plane approximation issue: obstacle center on the reference path centerline breaks the normals.
-    path_obstacles = [
-        {"distance": 3.0, "speed": 0.1, "radius": 0.4, "lateral_offset": 0.3},
-        {"distance": 5.5, "speed": 0.25, "radius": 0.3, "lateral_offset": -0.25},
-        {"distance": 8.5, "speed": 0.20, "radius": 0.5, "lateral_offset": 0.35},
-    ]
-
-    # NOTE:empty list to disable obstacles and remove viz
-    # path_obstacles = []
+    path_obstacles = list(sim_config["obstacles"])
 
     # move the obstacles along the path and computes the x and y velocity
     # [x,y,r,vx,vy] just as they would come out from a tracker (e.g. ekf estimate)
@@ -357,7 +359,9 @@ def main() -> None:
 
     shared = SharedData()
     mpc_thread = threading.Thread(
-        target=controller_loop, args=(mpc, path, shared), daemon=True
+        target=controller_loop,
+        args=(mpc, path, shared, goal_threshold, target_speed),
+        daemon=True,
     )
 
     # handle CTRL-C for the mpc thread
@@ -424,8 +428,8 @@ def main() -> None:
                         current_state[0],
                         current_state[1],
                         current_state[3],
-                        SENSOR_MAX_RANGE,
-                        SENSOR_FOV_DEG,
+                        sensor_max_range,
+                        sensor_fov_deg,
                     )
                 else:
                     detected_obs = None
@@ -485,8 +489,8 @@ def main() -> None:
                         current_state[0],
                         current_state[1],
                         current_state[3],
-                        SENSOR_MAX_RANGE,
-                        SENSOR_FOV_DEG,
+                        sensor_max_range,
+                        sensor_fov_deg,
                     )
                 draw_trail(viewer, x_hist, y_hist)
                 if x_mpc_world is not None:
