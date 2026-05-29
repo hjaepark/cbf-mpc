@@ -12,11 +12,15 @@ This mainly uses **[CVXPY](https://www.cvxpy.org/)** to maintain a strict quadra
 <table>
   <tr>
     <td><figure><img src="img/demo-mujoco.gif" width="500" /><figcaption>MuJoCo simulation with the mushr car model (without obstacles)</figcaption></figure></td>
-    <td><figure><img src="img/demo-mujoco_with_obs.gif" width="500" /><figcaption>MuJoCo simulation with obstacle avoidance</figcaption></figure></td>
+    <td><figure><img src="img/demo.gif" width="500" /><figcaption>Headless toy demo with dummy car (without obstacles)</figcaption></figure></td>
   </tr>
   <tr>
-    <td><figure><img src="img/demo.gif" width="500" /><figcaption>Headless toy demo with dummy car (without obstacles)</figcaption></figure></td>
-    <td><figure><img src="img/demo_with_obs.gif" width="500" /><figcaption>Headless toy demo with obstacle avoidance</figcaption></figure></td>
+    <td><figure><img src="img/demo-mujoco_with_obs.gif" width="500" /><figcaption>MuJoCo simulation with static obstacle avoidance</figcaption></figure></td>
+    <td><figure><img src="img/demo_with_obs.gif" width="500" /><figcaption>Headless toy demo with static obstacle avoidance</figcaption></figure></td>
+  </tr>
+  <tr>
+    <td><figure><img src="img/demo-mujoco_with_moving_obs.gif" width="500" /><figcaption>MuJoCo simulation with moving obstacle avoidance</figcaption></figure></td>
+    <td><figure><img src="img/demo_with_moving_obs.gif" width="500" /><figcaption>Headless toy demo with moving obstacle avoidance</figcaption></figure></td>
   </tr>
 </table>
 
