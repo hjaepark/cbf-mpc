@@ -93,7 +93,7 @@ def get_ref_trajectory(
     """
     K = int(T / DT)
 
-    # FIX 1: Allocate K + 1 elements to map exactly from k=0 (initial) to k=K (terminal)
+    # Allocate K + 1 elements to map exactly from k=0 (initial) to k=K (terminal)
     xref = np.zeros((4, K + 1))
     ind = get_nn_idx(state, path)
 
@@ -105,7 +105,7 @@ def get_ref_trajectory(
 
     start_dist = cdist[ind]
 
-    # FIX 2: Change range from (1, K + 1) to (0, K + 1) to include the t=0 starting node
+    # range is (0, K + 1) to include the t=0 starting node
     interp_points = [d * DT * target_v + start_dist for d in range(0, K + 1)]
 
     # Compute interpolation (automatically maps across all K + 1 points)
@@ -151,23 +151,85 @@ def ego_to_global(
     return traj
 
 
+def compute_path_arc_lengths(
+    path: npt.NDArray[np.float64],
+) -> tuple[npt.NDArray[np.float64], float]:
+    """Compute cumulative arc-length along a (3,N) path."""
+    cdist = np.zeros(path.shape[1])
+    cdist[1:] = np.cumsum(np.hypot(np.diff(path[0]), np.diff(path[1])))
+    return cdist, cdist[-1]
+
+
+def update_path_obstacles(
+    obstacles: list[dict],
+    path: npt.NDArray[np.float64],
+    dt: float,
+) -> list[list[float]]:
+    """Advance path-following obstacles and return [x, y, radius, vx, vy] list.
+
+    Each obstacle dict: {"distance": float, "speed": float, "radius": float}
+    Obstacles wrap around at the path end.
+    """
+    # ideally this should only be precomputed once
+    cdist, total_length = compute_path_arc_lengths(path)
+
+    result = []
+    for obs in obstacles:
+        obs["distance"] = (obs["distance"] + obs["speed"] * dt) % total_length
+        x = np.interp(obs["distance"], cdist, path[0])
+        y = np.interp(obs["distance"], cdist, path[1])
+
+        idx = max(
+            0,
+            min(
+                np.searchsorted(cdist, obs["distance"]) - 1,
+                path.shape[1] - 2,
+            ),
+        )
+        seg_dx = path[0, idx + 1] - path[0, idx]
+        seg_dy = path[1, idx + 1] - path[1, idx]
+        seg_len = np.hypot(seg_dx, seg_dy)
+        if seg_len > 1e-6:
+            tx = seg_dx / seg_len
+            ty = seg_dy / seg_len
+            vx = tx * obs["speed"]
+            vy = ty * obs["speed"]
+            lateral = obs.get("lateral_offset", 0.0)
+            if lateral != 0.0:
+                x += -ty * lateral
+                y += tx * lateral
+        else:
+            vx, vy = 0.0, 0.0
+
+        result.append([x, y, obs["radius"], vx, vy])
+    return result
+
+
 def compute_errors(
     current_state: npt.NDArray[np.float64], path: npt.NDArray[np.float64]
 ) -> tuple[float, float]:
+    """Compute signed cross-track error and heading error.
+
+    Signed_cte is positive if vehicle is to the left.
+    """
     assert path.shape[1] >= 2, "path must have at least 2 points"
-    # 1. Find the closest waypoint index
+    # Find the closest waypoint index
     dx = current_state[0] - path[0, :]
     dy = current_state[1] - path[1, :]
     distances = np.hypot(dx, dy)
     idx = np.argmin(distances)
 
-    # 2. Determine segment direction for true cross-track projection
+    # Determine segment direction for true cross-track projection
     # If we are at the very last point, look backward, otherwise look forward
-    idx_next = idx - 1 if idx == path.shape[1] - 1 else idx + 1
-
-    # Segment vector (tangent of the track)
-    tx = path[0, idx_next] - path[0, idx]
-    ty = path[1, idx_next] - path[1, idx]
+    if idx == path.shape[1] - 1:
+        idx_start = idx - 1
+        idx_end = idx
+    else:
+        idx_start = idx
+        idx_end = idx + 1
+    # Calculate forward-facing tangent vector
+    tx = path[0, idx_end] - path[0, idx_start]
+    ty = path[1, idx_end] - path[1, idx_start]
     seg_len = np.hypot(tx, ty)
 
     if seg_len > 1e-5:
@@ -180,31 +242,32 @@ def compute_errors(
         vy = current_state[1] - path[1, idx]
 
         # True Cross-Track Error is the perpendicular scalar projection (Using 2D Cross Product)
-        cte = np.abs(vx * ty - vy * tx)
+        cte = (vy * tx) - (vx * ty)
     else:
         cte = distances[idx]
 
-    # 3. Heading Error (Normalized between -pi and pi)
-    target_heading = path[2, idx]
+    # Heading Error (Normalized between -pi and pi)
+    target_heading = path[2, idx_start]
     heading_err = (current_state[3] - target_heading + np.pi) % (2.0 * np.pi) - np.pi
 
     return (cte, heading_err)
 
 
 def detect_obstacle_camera(
-    obstacles: list[tuple[float, float, float]],
+    obstacles: list[tuple[float, float, float, float, float]],
     robot_x: float,
     robot_y: float,
     robot_heading: float,
     max_range: float,
     fov_degrees: float = 60.0,
-) -> tuple[float, float, float] | None:
+) -> tuple[float, float, float, float, float] | None:
 
     closest = None
     closest_dist = float("inf")
     fov_rad = np.radians(fov_degrees)
+    for obs in obstacles:
+        obs_x, obs_y, obs_r, obs_vx, obs_vy = obs
 
-    for obs_x, obs_y, obs_r in obstacles:
         dx = obs_x - robot_x
         dy = obs_y - robot_y
         d = np.hypot(dx, dy)
@@ -214,16 +277,10 @@ def detect_obstacle_camera(
         if dist_to_edge > max_range:
             continue
 
-        ct = np.cos(-robot_heading)
-        st = np.sin(-robot_heading)
-        ego_x = dx * ct - dy * st
-        ego_y = dy * ct + dx * st
-        angle_to_obs_center = abs(np.arctan2(ego_y, ego_x))
-
-        if d > 0:
-            angular_radius = np.arcsin(min(1.0, obs_r / d))
-        else:
-            angular_radius = np.pi
+        # Normalize the relative angle to [-pi, pi]
+        rel_angle = (np.arctan2(dy, dx) - robot_heading + np.pi) % (2.0 * np.pi) - np.pi
+        angle_to_obs_center = abs(rel_angle)
+        angular_radius = np.arcsin(obs_r / d)
 
         # Check if the closest edge of the obstacle falls within half the FOV
         if (angle_to_obs_center - angular_radius) <= (fov_rad / 2.0):
@@ -231,6 +288,6 @@ def detect_obstacle_camera(
             # We track the closest obstacle by its closest EDGE, not its center
             if dist_to_edge < closest_dist:
                 closest_dist = dist_to_edge
-                closest = (obs_x, obs_y, obs_r)
+                closest = obs
 
     return closest

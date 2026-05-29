@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pathlib
 import signal
 import time
 
@@ -17,62 +18,52 @@ from cvxpy_mpc.utils import (
     detect_obstacle_camera,
     ego_to_global,
     get_ref_trajectory,
+    update_path_obstacles,
 )
 from scipy.integrate import odeint
-
-# Robot Starting position
-SIM_START_X = 0.0
-SIM_START_Y = 0.5
-SIM_START_V = 0.0
-SIM_START_H = 0.0
-
-
-# Params
-USE_OBS_AVOIDANCE = True
-
-TARGET_VEL = 1.0  # m/s
-
-OBS = (
-    [
-        (4.0, 2.2, 0.5),
-        (12.5, 0.5, 0.35),
-        (7.0, -5.5, 0.45),
-    ]
-    if USE_OBS_AVOIDANCE
-    else []
-)
-SENSOR_MAX_RANGE = 4.0
-SENSOR_FOV_DEG = 90.0
+import yaml
 
 
 # Classes
 class MPCSim:
     def __init__(self) -> None:
-        # State of the robot [x,y,v, heading]
-        self.state: npt.NDArray[np.float64] = np.array(
-            [SIM_START_X, SIM_START_Y, SIM_START_V, SIM_START_H]
+        sim_config = yaml.safe_load(
+            (pathlib.Path(__file__).parent / "config" / "simulation.yaml").read_text()
         )
+        start = sim_config["start"]
+        self.state: npt.NDArray[np.float64] = np.array(
+            [start["x"], start["y"], start["velocity"], start["heading"]]
+        )
+        self.target_speed = sim_config["target_speed"]
+        self.sensor_max_range = sim_config["sensor"]["max_range"]
+        self.sensor_fov_deg = sim_config["sensor"]["fov_deg"]
+        self.goal_threshold = sim_config["goal_threshold"]
 
         # helper variable to keep track of mpc output
         self.control: npt.NDArray[np.float64] = np.zeros(2)
 
-        self.mpc: MPC = MPC("config/mpc.yaml")
+        self.mpc: MPC = MPC(
+            "config/mpc.yaml",
+            horizon_time=4.0,
+        )
         self.K: int = self.mpc.control_horizon
         self.detected_obs: tuple[float, float, float] | None = None
 
         # Path from waypoint interpolation
         self.path: npt.NDArray[np.float64] = compute_path_from_wp(
-            [0, 3, 4, 6, 10, 12, 13, 13, 6, 1, 0],
-            [0, 0, 2, 4, 3, 3, -1, -2, -6, -2, -2],
-            0.05,
+            sim_config["path"]["waypoints_x"],
+            sim_config["path"]["waypoints_y"],
+            sim_config["path"]["interpolation_step"],
         )
+
+        self.path_obstacles = list(sim_config["obstacles"])
 
         # Helper variables to keep track of the sim
         self.sim_time: float = 0.0
-        self.x_history: list[float] = [SIM_START_X]
-        self.y_history: list[float] = [SIM_START_Y]
-        self.v_history: list[float] = [SIM_START_V]
-        self.h_history: list[float] = [SIM_START_H]
+        self.x_history: list[float] = [start["x"]]
+        self.y_history: list[float] = [start["y"]]
+        self.v_history: list[float] = [start["velocity"]]
+        self.h_history: list[float] = [start["heading"]]
         self.a_history: list[float] = [0.0]
         self.d_history: list[float] = [0.0]
         self.optimized_trajectory: npt.NDArray[np.float64] | None = None
@@ -104,8 +95,9 @@ class MPCSim:
 
         # Obstacle visualization
         self.obs_circles: list[plt.Circle] = []
-        if USE_OBS_AVOIDANCE:
-            for ox, oy, rad in OBS:
+        if self.path_obstacles:
+            initial_obs = update_path_obstacles(self.path_obstacles, self.path, 0.0)
+            for ox, oy, rad, _, _ in initial_obs:
                 c = plt.Circle(
                     (ox, oy),
                     rad,
@@ -119,7 +111,7 @@ class MPCSim:
             # Sensor FOV wedge
             self.fov_patch = Wedge(
                 (0, 0),
-                SENSOR_MAX_RANGE,
+                self.sensor_max_range,
                 0,
                 0,
                 color="gold",
@@ -164,9 +156,7 @@ class MPCSim:
         self.ax_accel.set_xlabel("t [s]")
         self.ax_accel.axhline(y=self.mpc.max_acc, c="gray", ls="--", lw=0.8)
         self.ax_accel.axhline(y=-self.mpc.max_acc, c="gray", ls="--", lw=0.8)
-        self.ax_accel.set_ylim(
-            -self.mpc.max_acc * 1.5, self.mpc.max_acc * 1.5
-        )
+        self.ax_accel.set_ylim(-self.mpc.max_acc * 1.5, self.mpc.max_acc * 1.5)
         (self.accel_line,) = self.ax_accel.plot([], [], c="tab:orange")
 
         # Steering subplot
@@ -183,7 +173,7 @@ class MPCSim:
         self.ax_vel = plt.subplot(gs[2, 2])
         self.ax_vel.set_ylabel("v(t) [m/s]")
         self.ax_vel.set_xlabel("t [s]")
-        self.ax_vel.axhline(y=TARGET_VEL, c="tab:orange", ls="--", label="target speed")
+        self.ax_vel.axhline(y=self.target_speed, c="tab:orange", ls="--", label="target speed")
         self.ax_vel.set_ylim(0, self.mpc.max_speed * 1.2)
         (self.vel_line,) = self.ax_vel.plot([], [], c="tab:blue", label="vehicle speed")
         self.ax_vel.legend(loc="lower right")
@@ -201,7 +191,7 @@ class MPCSim:
                         (self.state[0] - self.path[0, -1]) ** 2
                         + (self.state[1] - self.path[1, -1]) ** 2
                     )
-                    < 0.5
+                    < self.goal_threshold
                 ):
                     print(
                         "Success! Goal Reached\nClose the plot window or press CTRL-C to exit."
@@ -210,30 +200,45 @@ class MPCSim:
                         plt.pause(0.1)
                     return
                 # External obstacle detection pipeline
-                if USE_OBS_AVOIDANCE:
+                if self.path_obstacles:
+                    dynamic_obs = update_path_obstacles(
+                        self.path_obstacles, self.path, self.mpc.dt
+                    )
                     self.detected_obs = detect_obstacle_camera(
-                        OBS,
+                        dynamic_obs,
                         self.state[0],
                         self.state[1],
                         self.state[3],
-                        SENSOR_MAX_RANGE,
-                        SENSOR_FOV_DEG,
+                self.sensor_max_range,
+                        self.sensor_fov_deg,
                     )
                 else:
                     self.detected_obs = None
                 # Get Reference_traj -> inputs are in worldframe
-                target = get_ref_trajectory(self.state, self.path, TARGET_VEL, self.mpc.control_horizon * self.mpc.dt, self.mpc.dt)
+                target = get_ref_trajectory(
+                    self.state,
+                    self.path,
+                    self.target_speed,
+                    self.mpc.control_horizon * self.mpc.dt,
+                    self.mpc.dt,
+                )
 
                 # dynamycs w.r.t robot frame
                 curr_state = np.array([0, 0, self.state[2], 0])
 
                 # Transform global obstacle to ego frame
                 if self.detected_obs is not None:
-                    gx, gy, r = self.detected_obs
+                    gx, gy, r, vx, vy = self.detected_obs
                     dx = gx - self.state[0]
                     dy = gy - self.state[1]
                     ct, st = np.cos(-self.state[3]), np.sin(-self.state[3])
-                    obs_ego = (dx * ct - dy * st, dy * ct + dx * st, r)
+                    obs_ego = (
+                        dx * ct - dy * st,
+                        dy * ct + dx * st,
+                        r,
+                        vx * ct - vy * st,
+                        vy * ct + vx * st,
+                    )
                 else:
                     obs_ego = None
 
@@ -313,9 +318,13 @@ class MPCSim:
             self.ax_main, self.x_history[-1], self.y_history[-1], self.h_history[-1]
         )
 
-        # Sensor FOV wedge
-        if USE_OBS_AVOIDANCE:
-            half_fov = SENSOR_FOV_DEG / 2
+        if self.path_obstacles:
+            current_obs = update_path_obstacles(self.path_obstacles, self.path, 0.0)
+            for i, (ox, oy, _, _, _) in enumerate(current_obs):
+                self.obs_circles[i].set_center((ox, oy))
+
+            # Sensor FOV wedge
+            half_fov = self.sensor_fov_deg / 2
             theta1 = np.degrees(self.h_history[-1]) - half_fov
             theta2 = np.degrees(self.h_history[-1]) + half_fov
             self.fov_patch.set_center((self.x_history[-1], self.y_history[-1]))
@@ -330,7 +339,7 @@ class MPCSim:
         avoiding = (
             "YES"
             if self.detected_obs is not None
-            else "no" if USE_OBS_AVOIDANCE else "off"
+            else "no" if self.path_obstacles else "off"
         )
         self.hud.set_text(
             f"v: {self.state[2]:.2f} m/s  |  goal: {goal_dist:.2f} m  |  avoid: {avoiding}  |  MPC: {self.mpc_solve_time*1000:.0f} ms"

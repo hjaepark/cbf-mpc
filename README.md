@@ -9,22 +9,49 @@ A (hopefully) easy-to-follow  Iterative MPC tracking controller built with CVXPY
 
 This mainly uses **[CVXPY](https://www.cvxpy.org/)** to maintain a strict quadratic programming framework rather than relying on a non-linear solver like CasADi (which I love btw!). But, implementing an iMPC, we can still bridge the gap between convex optimization and real-world vehicle physics, allowing you to handle non-linear kinematics through iterative linearization.
 
-<table>
-  <tr>
-    <td><figure><img src="img/demo-mujoco.gif" width="500" /><figcaption>MuJoCo simulation with the mushr car model (without obstacles)</figcaption></figure></td>
-    <td><figure><img src="img/demo-mujoco_with_obs.gif" width="500" /><figcaption>MuJoCo simulation with obstacle avoidance</figcaption></figure></td>
-  </tr>
-  <tr>
-    <td><figure><img src="img/demo.gif" width="500" /><figcaption>Headless toy demo with dummy car (without obstacles)</figcaption></figure></td>
-    <td><figure><img src="img/demo_with_obs.gif" width="500" /><figcaption>Headless toy demo with obstacle avoidance</figcaption></figure></td>
-  </tr>
-</table>
-
 Note: I've also preserved my original notebooks on Model Predictive Control for path-following problems here for historical context, a bit outdated.
 
 This repo builds upon code and ideas from other open-source projects; please check them out in the Special Thanks section!
 
+## Showcase
+
+You can run the demo with MuJoCo and the mushr car or just python with no physics simulation:
+
+<table>
+  <tr>
+    <td><figure><img src="img/demo-mujoco.gif" width="500" /><figcaption>MuJoCo simulation with the mushr car model (without obstacles)</figcaption></figure></td>
+    <td><figure><img src="img/demo.gif" width="500" /><figcaption>Headless toy demo with dummy car (without obstacles)</figcaption></figure></td>
+  </tr>
+  <tr>
+    <td><figure><img src="img/demo-mujoco_with_obs.gif" width="500" /><figcaption>MuJoCo simulation with static obstacle avoidance</figcaption></figure></td>
+    <td><figure><img src="img/demo_with_obs.gif" width="500" /><figcaption>Headless toy demo with static obstacle avoidance</figcaption></figure></td>
+  </tr>
+  <tr>
+    <td><figure><img src="img/demo-mujoco_with_moving_obs.gif" width="500" /><figcaption>MuJoCo simulation with moving obstacle avoidance</figcaption></figure></td>
+    <td><figure><img src="img/demo_with_moving_obs.gif" width="500" /><figcaption>Headless toy demo with moving obstacle avoidance</figcaption></figure></td>
+  </tr>
+</table>
+
 ## Getting started
+
+Here is a brief overview of the codebase:
+
+```
+ mpc_python
+├──  config
+│   ├──  mpc.yaml # the configuration of the MPC. Start here!
+│   └──  simulation.yaml # common configuration of the demos
+└──  mpc_python
+   ├──  cvxpy_mpc
+   │   ├──  cvxpy_mpc.py # main mpc implementation
+   │   └──  utils.py
+   ├──  models
+   │   └──  mushr # model from prl-mushr/mushr_mujoco_ros
+   ├──  mpc_demo_mujoco.py # mujoco demo entry point
+   └──  mpc_demo_nosim.py  # no physics demo entry point
+```
+
+There are a few ways to run this:
 
 ### Nix Flake ❄️
 

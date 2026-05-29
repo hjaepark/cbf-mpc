@@ -17,13 +17,10 @@ from cvxpy_mpc.utils import (
     detect_obstacle_camera,
     ego_to_global,
     get_ref_trajectory,
+    update_path_obstacles,
 )
 
-USE_OBS_AVOIDANCE = True
-
-TARGET_VEL = 1.0
-SENSOR_MAX_RANGE = 4.0
-SENSOR_FOV_DEG = 90.0
+import yaml
 
 
 # MPC and sim are on 2 threads
@@ -50,7 +47,11 @@ class SharedData:
 
 
 def controller_loop(
-    mpc: MPC, path: npt.NDArray[np.float64], shared: SharedData
+    mpc: MPC,
+    path: npt.NDArray[np.float64],
+    shared: SharedData,
+    goal_threshold: float,
+    target_speed: float,
 ) -> None:
 
     while True:
@@ -72,7 +73,7 @@ def controller_loop(
             (current_state[0] - path[0, -1]) ** 2
             + (current_state[1] - path[1, -1]) ** 2
         )
-        if goal_dist < 0.2:
+        if goal_dist < goal_threshold:
             with shared.lock:
                 shared.goal_reached = True
             break
@@ -98,18 +99,24 @@ def controller_loop(
         # so we the optimization problem is a bit easier and we save some solver time
         # Get reference trajectory
         target = get_ref_trajectory(
-            pred_state, path, TARGET_VEL, mpc.control_horizon * mpc.dt, mpc.dt
+            pred_state, path, target_speed, mpc.control_horizon * mpc.dt, mpc.dt
         )
         pred_ego_state = [0.0, 0.0, pred_state[2], 0.0]
 
         # Transform global obstacle to ego frame using the same pred_state
         # that the rest of the MPC ego frame is built from
         if global_obs is not None:
-            gx, gy, r = global_obs
+            gx, gy, r, vx, vy = global_obs
             dx = gx - pred_state[0]
             dy = gy - pred_state[1]
             ct, st = np.cos(-pred_state[3]), np.sin(-pred_state[3])
-            pred_obstacle = (dx * ct - dy * st, dy * ct + dx * st, r)
+            pred_obstacle = (
+                dx * ct - dy * st,
+                dy * ct + dx * st,
+                r,
+                vx * ct - vy * st,
+                vy * ct + vx * st,
+            )
         else:
             pred_obstacle = None
 
@@ -209,7 +216,7 @@ def draw_trail(
 
 
 def draw_obstacle(viewer: mujoco.viewer.MjViewer, obstacles) -> None:
-    for idx, (ox, oy, rad) in enumerate(obstacles):
+    for idx, (ox, oy, rad, _, _) in enumerate(obstacles):
         if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
             return
         g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
@@ -316,24 +323,32 @@ def main() -> None:
     d = mujoco.MjData(m)
     bid = body_id(m, "buddy")
 
-    d.qpos[:4] = [0.0, 0.3, 0.1, 1.0]
+    sim_config = yaml.safe_load(
+        (pathlib.Path(__file__).parent / "config" / "simulation.yaml").read_text()
+    )
+    start = sim_config["start"]
+    target_speed = sim_config["target_speed"]
+    sensor_max_range = sim_config["sensor"]["max_range"]
+    sensor_fov_deg = sim_config["sensor"]["fov_deg"]
+    goal_threshold = sim_config["goal_threshold"]
+
+    d.qpos[:4] = [start["x"], start["y"], 0.1, 1.0]
     mujoco.mj_forward(m, d)
 
     path = compute_path_from_wp(
-        [0, 3, 4, 6, 10, 11, 12, 6, 1, 0],
-        [0, 0, 2, 4, 3, 3, -1, -6, -2, -2],
-        0.05,
+        sim_config["path"]["waypoints_x"],
+        sim_config["path"]["waypoints_y"],
+        sim_config["path"]["interpolation_step"],
     )
 
-    # only used when USE_OBS_AVOIDANCE
-    obstacle_list = [
-        (7.0, 3.8, 0.375),
-        (11.5, 2.5, 0.35),
-        (7.0, -5.5, 0.65),
-    ]
+    path_obstacles = list(sim_config["obstacles"])
 
+    # move the obstacles along the path and computes the x and y velocity
+    # [x,y,r,vx,vy] just as they would come out from a tracker (e.g. ekf estimate)
+    dynamic_obstacle_list = update_path_obstacles(path_obstacles, path, 0.0)
     mpc = MPC(
         "config/mpc.yaml",
+        # overriedes the default yaml
         horizon_time=4.0,
         state_cost=[1.0, 50.0, 10.0, 20.0],
         final_state_cost=[1.0, 50.0, 10.0, 20.0],
@@ -344,10 +359,18 @@ def main() -> None:
 
     shared = SharedData()
     mpc_thread = threading.Thread(
-        target=controller_loop, args=(mpc, path, shared), daemon=True
+        target=controller_loop,
+        args=(mpc, path, shared, goal_threshold, target_speed),
+        daemon=True,
     )
 
-    signal.signal(signal.SIGINT, signal.default_int_handler)
+    # handle CTRL-C for the mpc thread
+    shutdown_flag = threading.Event()
+
+    def handle_shutdown(signum, frame):
+        shutdown_flag.set()
+
+    signal.signal(signal.SIGINT, handle_shutdown)
 
     with mujoco.viewer.launch_passive(m, d) as viewer:
         viewer.cam.lookat[:] = [0.0, 0.0, 0.0]
@@ -358,7 +381,6 @@ def main() -> None:
         fps = 60.0
         render_dt = 1.0 / fps
 
-        control = [0.0, 0.0]  # steer and speed
         x_hist = []
         y_hist = []
         cte_hist = []
@@ -371,7 +393,7 @@ def main() -> None:
 
         try:
 
-            while viewer.is_running():
+            while viewer.is_running() and not shutdown_flag.is_set():
 
                 # Check for completion
                 if shared.goal_reached:
@@ -400,14 +422,14 @@ def main() -> None:
                 current_state = get_state(d, bid)
 
                 # External obstacle detection pipeline (global frame)
-                if USE_OBS_AVOIDANCE:
+                if path_obstacles:
                     detected_obs = detect_obstacle_camera(
-                        obstacle_list,
+                        dynamic_obstacle_list,
                         current_state[0],
                         current_state[1],
                         current_state[3],
-                        SENSOR_MAX_RANGE,
-                        SENSOR_FOV_DEG,
+                        sensor_max_range,
+                        sensor_fov_deg,
                     )
                 else:
                     detected_obs = None
@@ -431,7 +453,7 @@ def main() -> None:
                 heading_rmse = np.sqrt(np.mean(np.square(heading_error_hist)))
 
                 # Step physics
-                while d.time < elapsed_real_time:
+                while d.time < elapsed_real_time and not shutdown_flag.is_set():
                     # ZERO-ORDER HOLD (ZOH)
                     # The MPC outputs a target steering angle.
                     # Since the low-level actuator (aka steering wheel PID) usually
@@ -448,6 +470,10 @@ def main() -> None:
                     # velocity command over time, creating a First-Order Hold that perfectly mimics
                     # a real motor.
                     d.ctrl[1] += mpc_accel * m.opt.timestep
+
+                    dynamic_obstacle_list[:] = update_path_obstacles(
+                        path_obstacles, path, m.opt.timestep
+                    )
                     mujoco.mj_step(m, d)
 
                 # Update camera position to follow the car
@@ -456,15 +482,15 @@ def main() -> None:
                 # re-draw markers
                 viewer.user_scn.ngeom = 0
                 draw_path(viewer, path)
-                if USE_OBS_AVOIDANCE:
-                    draw_obstacle(viewer, obstacle_list)
+                if path_obstacles:
+                    draw_obstacle(viewer, dynamic_obstacle_list)
                     draw_sensor_fov(
                         viewer,
                         current_state[0],
                         current_state[1],
                         current_state[3],
-                        SENSOR_MAX_RANGE,
-                        SENSOR_FOV_DEG,
+                        sensor_max_range,
+                        sensor_fov_deg,
                     )
                 draw_trail(viewer, x_hist, y_hist)
                 if x_mpc_world is not None:
@@ -487,7 +513,7 @@ def main() -> None:
                             f"error:  CTE {cte:.3f} m  |  heading {np.degrees(heading_err):.1f} deg\n"
                             f"RMSE:   CTE {cte_rmse:.3f} m  |  heading {heading_rmse:.1f} deg\n"
                             f"goal:   {goal_dist:.2f} m\n"
-                            f"avoid:  {'YES' if detected_obs is not None else 'no' if USE_OBS_AVOIDANCE else 'off'}\n",
+                            f"avoid:  {'YES' if detected_obs is not None else 'no' if path_obstacles else 'off'}\n",
                             "",
                         )
                     ]
@@ -500,13 +526,15 @@ def main() -> None:
                 )
                 if time_until_next_frame > 0:
                     time.sleep(time_until_next_frame)
-
-        except KeyboardInterrupt:
-            print("\nInterrupted by user (CTRL-C). Shutting down...")
+        except Exception as e:
+            print(e)
 
         finally:
-            with shared.lock:
-                shared.is_active = False
+            shared.is_active = False
+            mpc_thread.join(timeout=1.0)
+            if mpc_thread.is_alive():
+                print("MPC thread is still alive...")
+
             viewer.clear_texts()
 
 

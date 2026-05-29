@@ -21,9 +21,14 @@ class MPC:
         slack_penalty: float | None = None,
     ) -> None:
         if isinstance(config, (str, pathlib.Path)):
-            with open(config) as f:
+            # resolve path
+            path = pathlib.Path(config)
+            if not path.is_absolute():
+                path = pathlib.Path(__file__).parent.parent / config
+            with open(path) as f:
                 config_data = yaml.safe_load(f)
         else:
+            # raw dict
             config_data = config
 
         vehicle_config = config_data["model"]["vehicle"]
@@ -341,8 +346,14 @@ class MPC:
         assert len(initial_state) == self._state_dim
         assert target.shape == (self._state_dim, self.control_horizon + 1)
 
-        obstacle_x, obstacle_y, obstacle_radius = (
-            obstacle if obstacle is not None else (None, None, None)
+        (
+            obstacle_x,
+            obstacle_y,
+            obstacle_radius,
+            obstacle_velocity_x,
+            obstacle_velocity_y,
+        ) = (
+            obstacle if obstacle is not None else (None, None, None, None, None)
         )
 
         self._initial_state.value = np.array(initial_state)
@@ -416,14 +427,17 @@ class MPC:
             obstacle_distances = np.zeros(self.control_horizon)
             for k in range(self.control_horizon):
                 if obstacle is None:
-                    # turn this in something trivial for the optimiser:warm_start
+                    # turn this in something trivial for the optimiser
                     obstacle_normals_x[k] = 1.0
                     obstacle_normals_y[k] = 0.0
                     obstacle_distances[k] = -1000.0
                 else:
                     # We need a stable point to calculate the normal vector.
-                    dx = x_ref[k + 1] - obstacle_x
-                    dy = y_ref[k + 1] - obstacle_y
+                    # Also we use the current belief of the obstacle moving velocity
+                    # to predict where its position will be at each k of th horizon
+                    dx = x_ref[k + 1] - obstacle_x - obstacle_velocity_x * k * self.dt
+                    dy = y_ref[k + 1] - obstacle_y - obstacle_velocity_y * k * self.dt
+
                     dist = np.hypot(dx, dy)
                     dist = dist if dist > 1e-5 else 1e-5
                     # [x,y] components of vector n
