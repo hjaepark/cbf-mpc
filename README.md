@@ -1,6 +1,6 @@
 # mpc_python
 
-A (hopefully) easy-to-follow  Iterative MPC tracking controller built with CVXPY and paired with MuJoCo. Designed to help anyone looking to transition from basic control to real-time convex optimization.
+A (hopefully) easy-to-follow Iterative MPC tracking controller built with CVXPY and paired with MuJoCo. Designed to help anyone looking to transition from basic control to real-time convex optimization.
 
 <figure>
   <img src="img/banner.png" width="500" />
@@ -37,18 +37,18 @@ You can run the demo with MuJoCo and the mushr car or just python with no physic
 Here is a brief overview of the codebase:
 
 ```
- mpc_python
-├──  config
-│   ├──  mpc.yaml # the configuration of the MPC. Start here!
-│   └──  simulation.yaml # common configuration of the demos
-└──  mpc_python
-   ├──  cvxpy_mpc
-   │   ├──  cvxpy_mpc.py # main mpc implementation
-   │   └──  utils.py
-   ├──  models
-   │   └──  mushr # model from prl-mushr/mushr_mujoco_ros
-   ├──  mpc_demo_mujoco.py # mujoco demo entry point
-   └──  mpc_demo_nosim.py  # no physics demo entry point
+mpc_python
+├── config/
+│   ├── mpc.yaml           # the configuration of the MPC. Start here!
+│   └── simulation.yaml    # common configuration of the demos
+└── mpc_python/
+    ├── cvxpy_mpc/
+    │   ├── cvxpy_mpc.py   # main mpc implementation
+    │   └── utils.py
+    ├── models/
+    │   └── mushr/         # model from prl-mushr/mushr_mujoco_ros
+    ├── mpc_demo_mujoco.py # mujoco demo entry point
+    └── mpc_demo_nosim.py  # no physics demo entry point
 ```
 
 There are a few ways to run this:
