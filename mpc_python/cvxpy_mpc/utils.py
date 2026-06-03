@@ -10,6 +10,14 @@ def compute_path_from_wp(
 ) -> npt.NDArray[np.float64]:
     """
     Generates a physically drivable, smooth C2 continuous path.
+
+    Args:
+        start_xp: X-coordinates of waypoints.
+        start_yp: Y-coordinates of waypoints.
+        step: Arc-length step between consecutive output points.
+
+    Returns:
+        Array of shape (3, N) with rows [x, y, heading] along the path.
     """
     # Fit a cubic spline (B-spline) to the waypoints
     # s=0 forces the spline to pass exactly through your waypoints.
@@ -37,14 +45,14 @@ def compute_path_from_wp(
 
 def get_nn_idx(state: npt.NDArray[np.float64], path: npt.NDArray[np.float64]) -> int:
     """
-    Finds the index of the closest element
+    Finds the index of the closest path point to the vehicle, with forward projection.
 
     Args:
-        state (array-like): 1D array whose first two elements are x-pos and y-pos
-        path (ndarray): 2D array of shape (2,N) of x,y points
+        state: Vehicle state [x, y, ...]. Only the first two elements are used.
+        path: Array of shape (2, N) of [x, y] path points.
 
     Returns:
-        int: the index of the closest element
+        Index of the closest or next-forward path point.
     """
     dx = state[0] - path[0, :]
     dy = state[1] - path[1, :]
@@ -64,7 +72,7 @@ def get_nn_idx(state: npt.NDArray[np.float64], path: npt.NDArray[np.float64]) ->
             target_idx = nn_idx
         else:
             target_idx = nn_idx + 1
-    except IndexError as e:
+    except IndexError:
         target_idx = nn_idx
     return target_idx
 
@@ -78,18 +86,20 @@ def get_ref_trajectory(
     ego_frame: bool = True,
 ) -> npt.NDArray[np.float64]:
     """
+    Builds a reference trajectory from the path for the MPC horizon.
+
     Args:
-        state (array-like): state of the vehicle in global frame [x, y, v, heading]
-        path (ndarray): 2D array representing the path as x,y,heading points in global frame
-        target_v (float): desired speed
-        T (float): control horizon duration
-        DT (float):  control horizon time-step
-        ego_frame (bool): If True, returns trajectory in vehicle's ego frame.
-                          If False, returns trajectory in the global world frame.
+        state: Vehicle state in global frame [x, y, v, heading].
+        path: Array of shape (3, N) with rows [x, y, heading] in global frame.
+        target_v: Desired forward speed.
+        T: Control horizon duration.
+        DT: Control horizon time-step.
+        ego_frame: If True, returns trajectory in the vehicle's ego frame.
+            If False, returns in the global world frame.
 
     Returns:
-        ndarray: 2D array representing state space trajectory [x_k, y_k, v_k, theta_k]
-                 with shape (4, K + 1) matching nodes from k=0 to k=K.
+        Array of shape (4, K+1) with rows [x, y, v, heading] representing
+        the reference trajectory over the horizon.
     """
     K = int(T / DT)
 
@@ -126,14 +136,14 @@ def get_ref_trajectory(
 
         xref[3, :] = xref[3, :] - state[3]  # Local Theta
 
-    # Continuous Angle Smoothing
+    # Continuous angle smoothing
     def fix_angle_reference(angle_ref, angle_init):
         diff_angle = angle_ref - angle_init
         diff_angle = np.unwrap(diff_angle)
         return angle_init + diff_angle
 
+    # Normalize to [-pi, pi], then unwrap to remove any discontinuity
     xref[3, :] = (xref[3, :] + np.pi) % (2.0 * np.pi) - np.pi
-
     xref[3, :] = fix_angle_reference(xref[3, :], xref[3, 0])
 
     return xref
@@ -142,6 +152,16 @@ def get_ref_trajectory(
 def ego_to_global(
     state: npt.NDArray[np.float64], x_mpc: npt.NDArray[np.float64]
 ) -> npt.NDArray[np.float64]:
+    """
+    Transforms MPC trajectory from ego frame to global frame.
+
+    Args:
+        state: Vehicle state [x, y, v, heading] in global frame.
+        x_mpc: MPC solution trajectory in ego frame (2, N).
+
+    Returns:
+        Trajectory in global frame (2, N).
+    """
     traj = x_mpc[:2, :].copy()
     ct, st = np.cos(state[3]), np.sin(state[3])
     R = np.array([[ct, -st], [st, ct]])
@@ -154,7 +174,15 @@ def ego_to_global(
 def compute_path_arc_lengths(
     path: npt.NDArray[np.float64],
 ) -> tuple[npt.NDArray[np.float64], float]:
-    """Compute cumulative arc-length along a (3,N) path."""
+    """Compute cumulative arc-length along a (3,N) path.
+
+    Args:
+        path: Array of shape (3, N) with rows [x, y, heading].
+
+    Returns:
+        Tuple of (cdist, total_length) where cdist is the cumulative
+        arc-length array and total_length is the total path length.
+    """
     cdist = np.zeros(path.shape[1])
     cdist[1:] = np.cumsum(np.hypot(np.diff(path[0]), np.diff(path[1])))
     return cdist, cdist[-1]
@@ -261,7 +289,20 @@ def detect_obstacle_camera(
     max_range: float,
     fov_degrees: float = 60.0,
 ) -> tuple[float, float, float, float, float] | None:
+    """Returns the closest obstacle within the robot's field of view.
 
+    Args:
+        obstacles: List of obstacles as [x, y, radius, vx, vy].
+        robot_x: Robot x position.
+        robot_y: Robot y position.
+        robot_heading: Robot heading in radians.
+        max_range: Maximum detection range.
+        fov_degrees: Field of view in degrees (default 60).
+
+    Returns:
+        The closest obstacle tuple (x, y, radius, vx, vy) or None if no obstacle
+        is within the FOV.
+    """
     closest = None
     closest_dist = float("inf")
     fov_rad = np.radians(fov_degrees)
