@@ -212,6 +212,40 @@ class MPC:
         cost = 0
         constraints = []
 
+        # XY tracking does NOT make much sense in autonomous driving...
+        # Instead we care how much off to the side we are w.r.t the track
+        #
+        # The standard cross-track and along-track errors are calculated by projecting position errors onto the track point
+        # $\theta_{\text{ref}}$:$$e_{\text{along}} = \cos(\theta_{\text{ref}})(x - x_{\text{ref}}) + \sin(\theta_{\text{ref}})(y - y_{\text{ref}})
+        # $e_{\text{cross}} = -\sin(\theta_{\text{ref}})(x - x_{\text{ref}}) + \cos(\theta_{\text{ref}})(y - y_{\text{ref}})$
+        #
+        # Squaring the param-affine error inside quad_form would create param*param
+        # terms and break DPP, so we pin the errors to fresh variables via equality
+        # constraints (param*variable is fine) and put the quadratic cost on those.
+        # see https://www.cvxpy.org/tutorial/dpp/index.html
+        track_error: opt.Variable = opt.Variable(
+            (self._state_dim, self.control_horizon + 1), name="track_error"
+        )
+        for k in range(self.control_horizon + 1):
+            constraints += [
+                track_error[0, k]
+                == self._cos_reference[k] * self._states[0, k]
+                + self._sin_reference[k] * self._states[1, k]
+                - self._along_reference[k]
+            ]
+            constraints += [
+                track_error[1, k]
+                == -self._sin_reference[k] * self._states[0, k]
+                + self._cos_reference[k] * self._states[1, k]
+                - self._cross_reference[k]
+            ]
+            constraints += [
+                track_error[2, k] == self._states[2, k] - self._velocity_reference[k]
+            ]
+            constraints += [
+                track_error[3, k] == self._states[3, k] - self._heading_reference[k]
+            ]
+
         for k in range(self.control_horizon):
             # Kinematics constrains
             # Note each step uses the LTV matrix for that step
@@ -221,35 +255,7 @@ class MPC:
                 + self._B_params[k] @ self._controls[:, k]
                 + self._C_params[k]
             ]
-            # XY tracking does NOT make much sense in autonomous driving...
-            # Instead we care how much off to the side we are w.r.t the track
-            #
-            # The standard cross-track and along-track errors are calculated by projecting position errors onto the track point
-            # $\theta_{\text{ref}}$:$$e_{\text{along}} = \cos(\theta_{\text{ref}})(x - x_{\text{ref}}) + \sin(\theta_{\text{ref}})(y - y_{\text{ref}})
-            # $e_{\text{cross}} = -\sin(\theta_{\text{ref}})(x - x_{\text{ref}}) + \cos(\theta_{\text{ref}})(y - y_{\text{ref}})$
-            # we expand that and get the following Algebraic problem:
-
-            # Algebraic along-track and cross-track expressions
-            # We will fill the values when the reference is provided, that is why they are params
-            along_track_error = (
-                self._cos_reference[k] * self._states[0, k]
-                + self._sin_reference[k] * self._states[1, k]
-                - self._along_reference[k]
-            )
-            cross_track_error = (
-                -self._sin_reference[k] * self._states[0, k]
-                + self._cos_reference[k] * self._states[1, k]
-                - self._cross_reference[k]
-            )
-            error = opt.vstack(
-                [
-                    along_track_error,
-                    cross_track_error,
-                    self._states[2, k] - self._velocity_reference[k],
-                    self._states[3, k] - self._heading_reference[k],
-                ]
-            )
-            cost += opt.quad_form(error, self.q_matrix)
+            cost += opt.quad_form(track_error[:, k], self.q_matrix)
 
             # Obstacle half-plane constraint:
             # obstacle avoidance: (px - pobs)*2 > R  in non-convex :(
@@ -278,33 +284,21 @@ class MPC:
             cost += opt.quad_form(self._controls[:, k], self.r_matrix)
 
             if k == 0:
-                cost += opt.quad_form(
-                    self._controls[:, 0] - self._last_command, self.rr_matrix
+                # last_command is a param, so subtracting it inside quad_form would
+                # create param*param terms and break DPP: pin the rate to a variable.
+                input_rate_0: opt.Variable = opt.Variable(
+                    self._control_dim, name="input_rate_0"
                 )
+                constraints += [
+                    input_rate_0 == self._controls[:, 0] - self._last_command
+                ]
+                cost += opt.quad_form(input_rate_0, self.rr_matrix)
             else:
                 cost += opt.quad_form(
                     self._controls[:, k] - self._controls[:, k - 1], self.rr_matrix
                 )
 
-        terminal_along_track_error = (
-            self._cos_reference[-1] * self._states[0, -1]
-            + self._sin_reference[-1] * self._states[1, -1]
-            - self._along_reference[-1]
-        )
-        terminal_cross_track_error = (
-            -self._sin_reference[-1] * self._states[0, -1]
-            + self._cos_reference[-1] * self._states[1, -1]
-            - self._cross_reference[-1]
-        )
-        terminal_error = opt.vstack(
-            [
-                terminal_along_track_error,
-                terminal_cross_track_error,
-                self._states[2, -1] - self._velocity_reference[-1],
-                self._states[3, -1] - self._heading_reference[-1],
-            ]
-        )
-        cost += opt.quad_form(terminal_error, self.qf_matrix)
+        cost += opt.quad_form(track_error[:, -1], self.qf_matrix)
 
         constraints += [self._states[:, 0] == self._initial_state]
 
