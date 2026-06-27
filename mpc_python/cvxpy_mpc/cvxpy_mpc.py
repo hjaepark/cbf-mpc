@@ -186,7 +186,8 @@ class MPC:
         A[0, 3] = -v * st
         A[1, 2] = st
         A[1, 3] = v * ct
-        A[3, 2] = v * td / self.wheelbase
+        # (previously had an extra factor of v, which left a first-order linearlization error in the heading channel)
+        A[3, 2] = td / self.wheelbase
         A_lin = np.eye(self._state_dim) + self.dt * A
 
         B = np.zeros((self._state_dim, self._control_dim))
